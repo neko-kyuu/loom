@@ -1,0 +1,26 @@
+.claude/
+.codex/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook
+.ipynb_checkpoints
+notebooks/
+
+# Environments
+.env
+.envrc
+.venv*
+venv*
+env/
+ENV/
+env.bak/
+
+# macOS display setting files
+.DS_Store
+
+# other
+plan/
