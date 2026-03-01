@@ -22,9 +22,20 @@ class Actor(BaseModel):
 
 class Conversation(BaseModel):
     id: str
-    kind: Literal["broadcast", "dm_to_pc", "pc_to_pc"]
+    kind: Literal["broadcast", "dm_to_pc", "pc_to_pc", "forum"]
     title: str
+    description: str | None = None
     participants: list[Actor]
+
+
+class ForumThread(BaseModel):
+    id: str
+    channel_id: str
+    title: str
+    created_at: str
+    created_by: Actor
+    last_activity_at: str
+    reply_count: int = 0
 
 
 class Message(BaseModel):
@@ -32,6 +43,7 @@ class Message(BaseModel):
     timestamp: str = Field(default_factory=utc_now_iso)
     conversation_id: str
     channel: Channel
+    thread_id: str | None = None
     from_actor: Actor
     to: list[Actor] = Field(default_factory=list)
     content: str
@@ -67,15 +79,17 @@ class WsClientToServer(BaseModel):
         "hello",
         "request_state",
         "user_inject",
+        "forum_post",
         "pause",
         "resume",
     ]
     content: str | None = None
     target: dict | None = None
+    channel_id: str | None = None
+    thread_id: str | None = None
     value: bool | None = None
 
 
 class WsServerToClient(BaseModel):
     type: Literal["state", "message", "typing", "queue", "error"]
     payload: dict
-

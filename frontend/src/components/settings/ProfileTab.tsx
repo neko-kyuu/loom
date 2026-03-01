@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { Plus, X, Send } from "lucide-react";
 import type { Actor } from "../../types";
 import type { MoodStatus, NameFont, NameStyle, Profile, ProfilesState } from "../../lib/profiles";
 import { chatDisplayName, defaultProfileForActor, getProfile, statusDotColor } from "../../lib/profiles";
@@ -407,7 +407,6 @@ export default function ProfileTab(props: {
                         <div className="profileName">{previewSub}</div>
                         {selectedProfile.tags.length ? (
                           <div className="profileTagsBlock">
-                            <div className="profileTagsTitle">身份组</div>
                             <div className="profileTags">
                               {selectedProfile.tags.map((t) => (
                                 <span key={t} className="tagPill">
@@ -421,11 +420,12 @@ export default function ProfileTab(props: {
                     </div>
                     {selectedActor.kind === "pc" ? (
                       <div className="profileDm">
-                        <div className="profileDmLabel">私信</div>
                         <div className="profileDmRow">
-                          <input className="profileDmInput" value="" placeholder="发给 PC…" readOnly />
-                          <button className="primary" disabled>
-                            发送
+                          <input className="profileDmInput" value="" placeholder="私信 PC…" readOnly />
+                          <button
+                            className="primary" disabled
+                          >
+                            <Send size={18} />
                           </button>
                         </div>
                       </div>

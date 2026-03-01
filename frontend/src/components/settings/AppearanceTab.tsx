@@ -86,7 +86,6 @@ export default function AppearanceTab(props: {
                     <span key={c} className="dot" style={{ background: c }} />
                   ))}
                 </span>
-                <span className="themeCardLabel">{opt.label}</span>
               </button>
             );
           })}
@@ -143,7 +142,6 @@ export default function AppearanceTab(props: {
                     <span className="dot" style={{ background: safeHex(t.colors.panel, DEFAULT_CUSTOM.panel) }} />
                     <span className="dot" style={{ background: safeHex(t.colors.accent, DEFAULT_CUSTOM.accent) }} />
                   </span>
-                  <span className="customThemeName">{t.name}</span>
                   {inUse ? <span className="tag">使用中</span> : null}
                 </button>
               );

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -10,7 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .db import SqliteStore
-from .engine import DemoEngine
+from .demo_forum import build_demo_forum_seed
+from .engine import DemoEngine, ForumChannel
 from .models import Actor, Message, WsClientToServer
 from .settings import get_settings
 from .ws import ConnectionManager
@@ -34,7 +36,79 @@ app.add_middleware(
 @app.on_event("startup")
 async def _startup() -> None:
     await store.init()
-    await store.upsert_conversations(engine.build_default_conversations())
+    profiles_json = await store.get_setting_json("profiles_state")
+    if profiles_json:
+        try:
+            engine.apply_profiles_state(json.loads(profiles_json))
+        except Exception:  # noqa: BLE001
+            pass
+    channels_json = await store.get_setting_json("channels_state")
+    if channels_json:
+        try:
+            channels_state = json.loads(channels_json)
+        except Exception:  # noqa: BLE001
+            channels_state = None
+    else:
+        channels_state = None
+
+    if not isinstance(channels_state, dict):
+        channels_state = {
+            "broadcast": {"description": "闲聊/广播频道（固定存在，不可删除）"},
+            "forums": [
+                {"id": "forum_trade", "title": "#trade", "description": "交易相关讨论"},
+                {"id": "forum_quest", "title": "#quest", "description": "任务/线索整理"},
+            ]
+        }
+        await store.set_setting_json("channels_state", json.dumps(channels_state))
+
+    forums_raw = channels_state.get("forums") if isinstance(channels_state, dict) else []
+    forum_channels: list[ForumChannel] = []
+    seen_forum_ids: set[str] = set()
+    if isinstance(forums_raw, list):
+        for item in forums_raw:
+            if not isinstance(item, dict):
+                continue
+            cid = item.get("id")
+            title = item.get("title")
+            if not isinstance(cid, str) or not cid.strip():
+                continue
+            if not isinstance(title, str) or not title.strip():
+                continue
+            cid_s = cid.strip()
+            if cid_s == "broadcast" or cid_s.startswith("dm_to_"):
+                continue
+            if cid_s in seen_forum_ids:
+                continue
+            t = title.strip()
+            if not t.startswith("#"):
+                t = f"#{t}"
+            seen_forum_ids.add(cid_s)
+            desc = item.get("description")
+            forum_channels.append(ForumChannel(id=cid_s, title=t, description=desc if isinstance(desc, str) else None))
+
+    broadcast_desc = None
+    b = channels_state.get("broadcast") if isinstance(channels_state, dict) else None
+    if isinstance(b, dict):
+        d = b.get("description")
+        if isinstance(d, str):
+            broadcast_desc = d
+
+    await store.sync_conversations(
+        engine.build_conversations(forum_channels=forum_channels, broadcast_description=broadcast_desc)
+    )
+
+    # demo seed: threads + posts for forum channels
+    now = datetime.now(timezone.utc)
+    for ch in forum_channels:
+        threads, posts = build_demo_forum_seed(
+            channel_id=ch.id,
+            channel_title=ch.title,
+            pcs=[(p.id, p.name) for p in engine.pcs],
+            now=now,
+        )
+        await store.upsert_forum_threads(threads)
+        for m in posts:
+            await store.add_message_ignore(m)
     await engine.start()
 
 
@@ -47,9 +121,11 @@ async def health() -> dict[str, Any]:
 async def get_settings_state() -> dict[str, Any]:
     appearance_json = await store.get_setting_json("appearance_state")
     profiles_json = await store.get_setting_json("profiles_state")
+    channels_json = await store.get_setting_json("channels_state")
     return {
         "appearance_state": json.loads(appearance_json) if appearance_json else None,
         "profiles_state": json.loads(profiles_json) if profiles_json else None,
+        "channels_state": json.loads(channels_json) if channels_json else None,
     }
 
 
@@ -62,6 +138,110 @@ async def put_appearance_state(payload: dict[str, Any] = Body(...)) -> dict[str,
 @app.put("/api/settings/profiles")
 async def put_profiles_state(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     await store.set_setting_json("profiles_state", json.dumps(payload))
+    engine.apply_profiles_state(payload)
+
+    channels_json = await store.get_setting_json("channels_state")
+    channels_state: Any | None
+    if channels_json:
+        try:
+            channels_state = json.loads(channels_json)
+        except Exception:  # noqa: BLE001
+            channels_state = None
+    else:
+        channels_state = None
+
+    broadcast_desc = None
+    forums_raw = None
+    if isinstance(channels_state, dict):
+        b = channels_state.get("broadcast")
+        if isinstance(b, dict):
+            d = b.get("description")
+            if isinstance(d, str):
+                broadcast_desc = d
+        forums_raw = channels_state.get("forums")
+
+    forum_channels: list[ForumChannel] = []
+    seen_forum_ids: set[str] = set()
+    if isinstance(forums_raw, list):
+        for item in forums_raw:
+            if not isinstance(item, dict):
+                continue
+            cid = item.get("id")
+            title = item.get("title")
+            if not isinstance(cid, str) or not cid.strip():
+                continue
+            if not isinstance(title, str) or not title.strip():
+                continue
+            cid_s = cid.strip()
+            if cid_s == "broadcast" or cid_s.startswith("dm_to_"):
+                continue
+            if cid_s in seen_forum_ids:
+                continue
+            seen_forum_ids.add(cid_s)
+            t = title.strip()
+            if not t.startswith("#"):
+                t = f"#{t}"
+            desc = item.get("description")
+            forum_channels.append(ForumChannel(id=cid_s, title=t, description=desc if isinstance(desc, str) else None))
+
+    await store.sync_conversations(engine.build_conversations(forum_channels=forum_channels, broadcast_description=broadcast_desc))
+    return {"ok": True}
+
+
+@app.put("/api/settings/channels")
+async def put_channels_state(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    broadcast_out: dict[str, str] = {}
+    broadcast_in = payload.get("broadcast")
+    if isinstance(broadcast_in, dict):
+        d = broadcast_in.get("description")
+        if isinstance(d, str):
+            broadcast_out["description"] = d
+
+    forums_raw = payload.get("forums")
+    forums_out: list[dict[str, str]] = []
+    forum_channels: list[ForumChannel] = []
+    seen_forum_ids: set[str] = set()
+
+    if isinstance(forums_raw, list):
+        for item in forums_raw:
+            if not isinstance(item, dict):
+                continue
+            cid = item.get("id")
+            title = item.get("title")
+            if not isinstance(cid, str) or not cid.strip():
+                continue
+            if not isinstance(title, str) or not title.strip():
+                continue
+            desc = item.get("description")
+            t = title.strip()
+            if not t.startswith("#"):
+                t = f"#{t}"
+            cid_s = cid.strip()
+            if cid_s == "broadcast" or cid_s.startswith("dm_to_"):
+                continue
+            if cid_s in seen_forum_ids:
+                continue
+            seen_forum_ids.add(cid_s)
+            out = {"id": cid_s, "title": t}
+            if isinstance(desc, str) and desc:
+                out["description"] = desc
+            forums_out.append(out)
+            forum_channels.append(ForumChannel(id=cid_s, title=t, description=desc if isinstance(desc, str) else None))
+
+    state = {"broadcast": broadcast_out, "forums": forums_out}
+    await store.set_setting_json("channels_state", json.dumps(state))
+    await store.sync_conversations(
+        engine.build_conversations(
+            forum_channels=forum_channels,
+            broadcast_description=broadcast_out.get("description") or None,
+        )
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/forum/threads/{thread_id}")
+async def delete_forum_thread(thread_id: str) -> dict[str, Any]:
+    await store.delete_forum_thread(thread_id)
     return {"ok": True}
 
 
@@ -118,12 +298,26 @@ async def _send_state(websocket: WebSocket) -> None:
         msgs = await store.list_messages(conv.id, limit=200)
         messages_by_conv[conv.id] = [m.model_dump() for m in msgs]
 
+    forum_threads_by_channel: dict[str, list[dict[str, Any]]] = {}
+    forum_posts_by_thread: dict[str, list[dict[str, Any]]] = {}
+    for conv in conversations:
+        if conv.kind != "forum":
+            continue
+        threads = await store.list_forum_threads(conv.id)
+        forum_threads_by_channel[conv.id] = [t.model_dump() for t in threads]
+        for t in threads:
+            posts = await store.list_messages_by_thread(t.id, limit=200)
+            posts = [p for p in posts if p.conversation_id == conv.id]
+            forum_posts_by_thread[t.id] = [p.model_dump() for p in posts]
+
     await websocket.send_json(
         {
             "type": "state",
             "payload": {
                 "conversations": [c.model_dump() for c in conversations],
                 "messages_by_conversation": messages_by_conv,
+                "forum_threads_by_channel": forum_threads_by_channel,
+                "forum_posts_by_thread": forum_posts_by_thread,
             },
         }
     )
@@ -154,6 +348,47 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await engine.set_paused(False)
                 continue
 
+            if data.type == "forum_post":
+                content = (data.content or "").strip()
+                if not content:
+                    await websocket.send_json({"type": "error", "payload": {"message": "content is required"}})
+                    continue
+                channel_id = (data.channel_id or "").strip()
+                thread_id = (data.thread_id or "").strip()
+                if not channel_id or not thread_id:
+                    await websocket.send_json(
+                        {"type": "error", "payload": {"message": "channel_id and thread_id are required"}}
+                    )
+                    continue
+
+                convs = await store.list_conversations()
+                conv = next((c for c in convs if c.id == channel_id), None)
+                if conv is None or conv.kind != "forum":
+                    await websocket.send_json({"type": "error", "payload": {"message": "forum channel not found"}})
+                    continue
+
+                thread = await store.get_forum_thread(thread_id)
+                if thread is None or thread.channel_id != channel_id:
+                    await websocket.send_json({"type": "error", "payload": {"message": "thread not found"}})
+                    continue
+
+                msg = Message(
+                    conversation_id=channel_id,
+                    channel="broadcast",
+                    thread_id=thread_id,
+                    from_actor=Actor(kind="user", id="user", name="You"),
+                    to=[],
+                    content=content,
+                )
+                await store.add_message(msg)
+                await ws_manager.broadcast({"type": "message", "payload": msg.model_dump()})
+
+                total = await store.count_messages_by_thread(thread_id)
+                thread.last_activity_at = msg.timestamp
+                thread.reply_count = max(0, total - 1)
+                await store.upsert_forum_threads([thread])
+                continue
+
             if data.type == "user_inject":
                 content = (data.content or "").strip()
                 target = data.target or {}
@@ -163,16 +398,49 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     )
                     continue
 
+                origin_channel_id = (data.channel_id or "").strip() if data.channel_id else ""
+                origin_thread_id = (data.thread_id or "").strip() if data.thread_id else ""
+                if (origin_channel_id and not origin_thread_id) or (origin_thread_id and not origin_channel_id):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "payload": {"message": "channel_id and thread_id must be both provided"},
+                        }
+                    )
+                    continue
+
+                if origin_channel_id:
+                    convs = await store.list_conversations()
+                    origin_conv = next((c for c in convs if c.id == origin_channel_id), None)
+                    if origin_conv is None or origin_conv.kind != "forum":
+                        await websocket.send_json(
+                            {"type": "error", "payload": {"message": "origin forum channel not found"}}
+                        )
+                        continue
+                    thread = await store.get_forum_thread(origin_thread_id)
+                    if thread is None or thread.channel_id != origin_channel_id:
+                        await websocket.send_json({"type": "error", "payload": {"message": "origin thread not found"}})
+                        continue
+
                 # 1) user -> DM message (always goes to broadcast for visibility in demo)
                 user_msg = Message(
-                    conversation_id="broadcast",
+                    conversation_id=origin_channel_id or "broadcast",
                     channel="broadcast",
+                    thread_id=origin_thread_id or None,
                     from_actor=Actor(kind="user", id="user", name="You"),
                     to=[Actor(kind="dm", id="dm", name="DM")],
                     content=content,
                 )
                 await store.add_message(user_msg)
                 await ws_manager.broadcast({"type": "message", "payload": user_msg.model_dump()})
+
+                if origin_thread_id:
+                    thread = await store.get_forum_thread(origin_thread_id)
+                    if thread:
+                        total = await store.count_messages_by_thread(origin_thread_id)
+                        thread.last_activity_at = user_msg.timestamp
+                        thread.reply_count = max(0, total - 1)
+                        await store.upsert_forum_threads([thread])
 
                 # 2) DM routes message: broadcast or per-PC direct copies
                 kind = target.get("kind") if isinstance(target, dict) else None
@@ -189,6 +457,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         dm_msg = Message(
                             conversation_id=conv_id,
                             channel="direct",
+                            thread_id=origin_thread_id or None,
                             from_actor=Actor(kind="dm", id="dm", name="DM"),
                             to=[Actor(kind="pc", id=pc_id)],
                             content=content,
@@ -197,12 +466,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         await store.add_message(dm_msg)
                         await ws_manager.broadcast({"type": "message", "payload": dm_msg.model_dump()})
                         await engine.enqueue_pc_reaction(
-                            conversation_id=conv_id, pc_id=pc_id, prompt=content
+                            conversation_id=conv_id, pc_id=pc_id, prompt=content, thread_id=origin_thread_id or None
                         )
                 else:
                     dm_msg = Message(
-                        conversation_id="broadcast",
+                        conversation_id=origin_channel_id or "broadcast",
                         channel="broadcast",
+                        thread_id=origin_thread_id or None,
                         from_actor=Actor(kind="dm", id="dm", name="DM"),
                         to=[],
                         content=content,
@@ -211,7 +481,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     await ws_manager.broadcast({"type": "message", "payload": dm_msg.model_dump()})
                     for pc in engine.pcs:
                         await engine.enqueue_pc_reaction(
-                            conversation_id="broadcast", pc_id=pc.id, prompt=content
+                            conversation_id=origin_channel_id or "broadcast",
+                            pc_id=pc.id,
+                            prompt=content,
+                            thread_id=origin_thread_id or None,
                         )
 
     except WebSocketDisconnect:

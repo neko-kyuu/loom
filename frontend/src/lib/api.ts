@@ -22,7 +22,7 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function getSettingsState(): Promise<{ appearance_state: any; profiles_state: any }> {
+export async function getSettingsState(): Promise<{ appearance_state: any; profiles_state: any; channels_state: any }> {
   return await jsonFetch(`${httpBase()}/api/settings`);
 }
 
@@ -32,6 +32,14 @@ export async function putAppearanceState(payload: any): Promise<void> {
 
 export async function putProfilesState(payload: any): Promise<void> {
   await jsonFetch(`${httpBase()}/api/settings/profiles`, { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export async function putChannelsState(payload: any): Promise<void> {
+  await jsonFetch(`${httpBase()}/api/settings/channels`, { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export async function deleteForumThread(threadId: string): Promise<void> {
+  await jsonFetch(`${httpBase()}/api/forum/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
 }
 
 export async function uploadAssetDataUrl(dataUrl: string): Promise<{ id: string; url: string }> {
@@ -44,4 +52,3 @@ export function absoluteAssetUrl(pathOrUrl: string) {
   if (pathOrUrl.startsWith("/")) return `${httpBase()}${pathOrUrl}`;
   return pathOrUrl;
 }
-

@@ -109,20 +109,12 @@ html[data-theme="milktea"] .profileOverlay {
 }
 
 .profileName {
-  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
 }
 
 .profileTagsBlock {
   margin-top: 10px;
-}
-
-.profileTagsTitle {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 900;
-  margin-bottom: 8px;
 }
 
 .profileTags {
@@ -145,13 +137,6 @@ html[data-theme="milktea"] .profileOverlay {
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-}
-
-.profileDmLabel {
-  font-size: 12px;
-  font-weight: 900;
-  color: var(--muted);
-  margin-bottom: 8px;
 }
 
 .profileDmRow {

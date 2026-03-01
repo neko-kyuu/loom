@@ -11,10 +11,17 @@ from .settings import Settings
 from .ws import ConnectionManager
 
 
-@dataclass(frozen=True)
+@dataclass
 class PC:
     id: str
     name: str
+
+
+@dataclass(frozen=True)
+class ForumChannel:
+    id: str
+    title: str
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -22,6 +29,7 @@ class Job:
     conversation_id: str
     pc: PC
     prompt: str
+    thread_id: str | None = None
 
 
 class DemoEngine:
@@ -43,24 +51,76 @@ class DemoEngine:
             PC(id="pc_4", name="Dylan"),
         ]
 
-    def build_default_conversations(self) -> list[Conversation]:
+    def apply_profiles_state(self, profiles_state: Any) -> None:
+        """
+        Sync PC display names from frontend profiles_state payload.
+
+        Expected shape:
+          { "profiles": [ { "id": "pc_1", "kind": "pc", "displayName": "..." }, ... ] }
+        """
+        if not isinstance(profiles_state, dict):
+            return
+        raw_profiles = profiles_state.get("profiles")
+        if not isinstance(raw_profiles, list):
+            return
+
+        display_name_by_id: dict[str, str] = {}
+        for item in raw_profiles:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            if kind != "pc":
+                continue
+            pid = item.get("id")
+            name = item.get("displayName")
+            if not isinstance(pid, str) or not pid.strip():
+                continue
+            if not isinstance(name, str) or not name.strip():
+                continue
+            display_name_by_id[pid.strip()] = name.strip()
+
+        if not display_name_by_id:
+            return
+
+        for pc in self.pcs:
+            new_name = display_name_by_id.get(pc.id)
+            if new_name:
+                pc.name = new_name
+
+    def build_conversations(self, *, forum_channels: list[ForumChannel], broadcast_description: str | None = None) -> list[Conversation]:
         broadcast = Conversation(
             id="broadcast",
             kind="broadcast",
             title="#broadcast",
+            description=broadcast_description,
             participants=[Actor(kind="dm", id="dm", name="DM")]
             + [Actor(kind="pc", id=p.id, name=p.name) for p in self.pcs],
         )
+        forums = [
+            Conversation(
+                id=ch.id,
+                kind="forum",
+                title=ch.title,
+                description=ch.description,
+                participants=[Actor(kind="dm", id="dm", name="DM")]
+                + [Actor(kind="pc", id=p.id, name=p.name) for p in self.pcs],
+            )
+            for ch in forum_channels
+        ]
         dm_to_pc = [
             Conversation(
                 id=f"dm_to_{p.id}",
                 kind="dm_to_pc",
                 title=f"DM → {p.name}",
+                description=f"DM 与 {p.name} 的私聊会话",
                 participants=[Actor(kind="dm", id="dm", name="DM"), Actor(kind="pc", id=p.id, name=p.name)],
             )
             for p in self.pcs
         ]
-        return [broadcast, *dm_to_pc]
+        return [broadcast, *forums, *dm_to_pc]
+
+    def build_default_conversations(self) -> list[Conversation]:
+        return self.build_conversations(forum_channels=[], broadcast_description=None)
 
     async def start(self) -> None:
         if self._runner_task is None:
@@ -74,11 +134,13 @@ class DemoEngine:
             self._pause_event.set()
         await self._broadcast_queue_state()
 
-    async def enqueue_pc_reaction(self, *, conversation_id: str, pc_id: str, prompt: str) -> None:
+    async def enqueue_pc_reaction(
+        self, *, conversation_id: str, pc_id: str, prompt: str, thread_id: str | None = None
+    ) -> None:
         pc = next((p for p in self.pcs if p.id == pc_id), None)
         if pc is None:
             raise ValueError(f"unknown pc_id: {pc_id}")
-        await self._queue.put(Job(conversation_id=conversation_id, pc=pc, prompt=prompt))
+        await self._queue.put(Job(conversation_id=conversation_id, pc=pc, prompt=prompt, thread_id=thread_id))
         await self._broadcast_queue_state()
 
     async def _broadcast_queue_state(self) -> None:
@@ -110,6 +172,7 @@ class DemoEngine:
                 message = Message(
                     conversation_id=job.conversation_id,
                     channel="direct" if job.conversation_id != "broadcast" else "broadcast",
+                    thread_id=job.thread_id,
                     from_actor=Actor(kind="pc", id=job.pc.id, name=job.pc.name),
                     to=[Actor(kind="dm", id="dm", name="DM")],
                     content=reply,
@@ -136,4 +199,3 @@ class DemoEngine:
     @staticmethod
     def new_send_batch_id() -> str:
         return str(uuid4())
-

@@ -2,6 +2,7 @@
 @import "./styles/base.css";
 @import "./styles/layout.css";
 @import "./styles/chat.css";
+@import "./styles/forum.css";
 @import "./styles/settings.css";
 @import "./styles/profile.css";
 @import "./styles/crop.css";

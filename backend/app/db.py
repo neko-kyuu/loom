@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 import aiosqlite
 
-from .models import Conversation, Event, Message
+from .models import Conversation, Event, ForumThread, Message
 
 
 SCHEMA_SQL = """
@@ -21,10 +21,13 @@ CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
   timestamp TEXT NOT NULL,
+  thread_id TEXT,
   payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv_time
   ON messages(conversation_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_thread_time
+  ON messages(thread_id, timestamp);
 
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
@@ -33,6 +36,15 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_time
   ON events(timestamp);
+
+CREATE TABLE IF NOT EXISTS forum_threads (
+  id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_forum_threads_channel
+  ON forum_threads(channel_id, created_at);
 
 CREATE TABLE IF NOT EXISTS kv_settings (
   key TEXT PRIMARY KEY,
@@ -56,7 +68,18 @@ class SqliteStore:
     async def init(self) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.executescript(SCHEMA_SQL)
+            await self._migrate(db)
             await db.commit()
+
+    async def _migrate(self, db: aiosqlite.Connection) -> None:
+        db.row_factory = aiosqlite.Row
+
+        cur = await db.execute("PRAGMA table_info(messages)")
+        cols = await cur.fetchall()
+        col_names = {r["name"] for r in cols}
+        if "thread_id" not in col_names:
+            await db.execute("ALTER TABLE messages ADD COLUMN thread_id TEXT")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_time ON messages(thread_id, timestamp)")
 
     async def upsert_conversations(self, conversations: Iterable[Conversation]) -> None:
         rows = [(c.id, c.model_dump_json()) for c in conversations]
@@ -68,6 +91,24 @@ class SqliteStore:
             )
             await db.commit()
 
+    async def sync_conversations(self, conversations: Iterable[Conversation]) -> None:
+        """
+        Upserts provided conversations and deletes any existing conversations that are not present.
+        """
+        desired = list(conversations)
+        desired_ids = {c.id for c in desired}
+        await self.upsert_conversations(desired)
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT id FROM conversations")
+            rows = await cur.fetchall()
+            existing_ids = [r["id"] for r in rows]
+            to_delete = [cid for cid in existing_ids if cid not in desired_ids]
+            if to_delete:
+                await db.executemany("DELETE FROM conversations WHERE id=?", [(cid,) for cid in to_delete])
+                await db.commit()
+
     async def list_conversations(self) -> list[Conversation]:
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
@@ -78,8 +119,28 @@ class SqliteStore:
     async def add_message(self, message: Message) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(
-                "INSERT INTO messages(id, conversation_id, timestamp, payload) VALUES(?, ?, ?, ?)",
-                (message.id, message.conversation_id, message.timestamp, message.model_dump_json()),
+                "INSERT INTO messages(id, conversation_id, timestamp, thread_id, payload) VALUES(?, ?, ?, ?, ?)",
+                (
+                    message.id,
+                    message.conversation_id,
+                    message.timestamp,
+                    message.thread_id,
+                    message.model_dump_json(),
+                ),
+            )
+            await db.commit()
+
+    async def add_message_ignore(self, message: Message) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO messages(id, conversation_id, timestamp, thread_id, payload) VALUES(?, ?, ?, ?, ?)",
+                (
+                    message.id,
+                    message.conversation_id,
+                    message.timestamp,
+                    message.thread_id,
+                    message.model_dump_json(),
+                ),
             )
             await db.commit()
 
@@ -95,6 +156,60 @@ class SqliteStore:
         msgs = [Message.model_validate_json(r["payload"]) for r in rows]
         msgs.reverse()
         return msgs
+
+    async def list_messages_by_thread(self, thread_id: str, limit: int = 200) -> list[Message]:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT payload FROM messages WHERE thread_id=? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (thread_id, limit),
+            )
+            rows = await cur.fetchall()
+        msgs = [Message.model_validate_json(r["payload"]) for r in rows]
+        msgs.reverse()
+        return msgs
+
+    async def upsert_forum_threads(self, threads: Iterable[ForumThread]) -> None:
+        rows = [(t.id, t.channel_id, t.created_at, t.model_dump_json()) for t in threads]
+        async with aiosqlite.connect(self._path) as db:
+            await db.executemany(
+                "INSERT INTO forum_threads(id, channel_id, created_at, payload) VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, channel_id=excluded.channel_id, created_at=excluded.created_at",
+                rows,
+            )
+            await db.commit()
+
+    async def list_forum_threads(self, channel_id: str) -> list[ForumThread]:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT payload FROM forum_threads WHERE channel_id=? ORDER BY created_at DESC",
+                (channel_id,),
+            )
+            rows = await cur.fetchall()
+        return [ForumThread.model_validate_json(r["payload"]) for r in rows]
+
+    async def get_forum_thread(self, thread_id: str) -> ForumThread | None:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT payload FROM forum_threads WHERE id=?", (thread_id,))
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return ForumThread.model_validate_json(row["payload"])
+
+    async def count_messages_by_thread(self, thread_id: str) -> int:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute("SELECT COUNT(1) AS c FROM messages WHERE thread_id=?", (thread_id,))
+            row = await cur.fetchone()
+        return int(row[0] if row else 0)
+
+    async def delete_forum_thread(self, thread_id: str) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute("DELETE FROM forum_threads WHERE id=?", (thread_id,))
+            await db.execute("DELETE FROM messages WHERE thread_id=?", (thread_id,))
+            await db.commit()
 
     async def add_event(self, event: Event) -> None:
         async with aiosqlite.connect(self._path) as db:

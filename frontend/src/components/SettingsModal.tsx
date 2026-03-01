@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type SettingsTabId = "appearance" | "profile";
+export type SettingsTabId = "appearance" | "profile" | "channels";
 
 export default function SettingsModal(props: {
   open: boolean;
@@ -23,6 +23,12 @@ export default function SettingsModal(props: {
       >
         <div className="modalNav">
           <div className="modalNavTitle">设置</div>
+          <button
+            className={`navItem ${props.tab === "channels" ? "active" : ""}`}
+            onClick={() => props.onTabChange("channels")}
+          >
+            频道
+          </button>
           <button
             className={`navItem ${props.tab === "appearance" ? "active" : ""}`}
             onClick={() => props.onTabChange("appearance")}

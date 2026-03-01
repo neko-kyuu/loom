@@ -6,8 +6,9 @@ export type Actor = {
 
 export type Conversation = {
   id: string;
-  kind: "broadcast" | "dm_to_pc" | "pc_to_pc";
+  kind: "broadcast" | "dm_to_pc" | "pc_to_pc" | "forum";
   title: string;
+  description?: string | null;
   participants: Actor[];
 };
 
@@ -16,6 +17,7 @@ export type Message = {
   timestamp: string;
   conversation_id: string;
   channel: "broadcast" | "direct";
+  thread_id?: string | null;
   from_actor: Actor;
   to: Actor[];
   content: string;
@@ -23,7 +25,15 @@ export type Message = {
 };
 
 export type WsServerToClient =
-  | { type: "state"; payload: { conversations: Conversation[]; messages_by_conversation: Record<string, Message[]> } }
+  | {
+      type: "state";
+      payload: {
+        conversations: Conversation[];
+        messages_by_conversation: Record<string, Message[]>;
+        forum_threads_by_channel?: Record<string, ForumThread[]>;
+        forum_posts_by_thread?: Record<string, Message[]>;
+      };
+    }
   | { type: "message"; payload: Message }
   | { type: "typing"; payload: { conversation_id: string; pc_id: string; value: boolean } }
   | { type: "queue"; payload: { paused: boolean; queued: number } }
@@ -34,5 +44,29 @@ export type WsClientToServer =
   | { type: "request_state" }
   | { type: "pause"; value: boolean }
   | { type: "resume" }
-  | { type: "user_inject"; content: string; target: { kind: "broadcast" } | { kind: "direct"; pc_ids: string[] } };
+  | {
+      type: "user_inject";
+      content: string;
+      target: { kind: "broadcast" } | { kind: "direct"; pc_ids: string[] };
+      channel_id?: string;
+      thread_id?: string;
+    }
+  | { type: "forum_post"; channel_id: string; thread_id: string; content: string };
 
+export type ForumThread = {
+  id: string;
+  channel_id: string;
+  title: string;
+  created_at: string;
+  created_by: Actor;
+  last_activity_at: string;
+  reply_count: number;
+};
+
+export type ForumPost = {
+  id: string;
+  thread_id: string;
+  timestamp: string;
+  from_actor: Actor;
+  content: string;
+};

@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import type { Conversation, Message, WsServerToClient } from "./types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Conversation, ForumThread, Message, WsServerToClient } from "./types";
 import { createWs } from "./lib/ws";
-import { Settings } from "lucide-react";
+import { Hash, List, MessageCircle, Settings, Pause, Play, Trash2, X } from "lucide-react";
 import SettingsModal, { type SettingsTabId } from "./components/SettingsModal";
 import AppearanceTab from "./components/settings/AppearanceTab";
+import ChannelsTab from "./components/settings/ChannelsTab";
 import ProfileTab from "./components/settings/ProfileTab";
 import ProfileNavList from "./components/settings/ProfileNavList";
 import ProfileCard from "./components/ProfileCard";
+import ChatFlow from "./components/ChatFlow";
 import {
   applyAppearance,
   getInitialAppearanceState,
@@ -18,7 +20,7 @@ import {
   type CustomTheme
 } from "./lib/appearance";
 import type { Actor } from "./types";
-import type { Profile, ProfilesState } from "./lib/profiles";
+import type { ProfilesState } from "./lib/profiles";
 import {
   chatDisplayName,
   ensureProfiles,
@@ -28,30 +30,26 @@ import {
   persistProfiles,
   statusDotColor
 } from "./lib/profiles";
-import { absoluteAssetUrl, getSettingsState, putAppearanceState, putProfilesState, wsUrl } from "./lib/api";
-
-function formatTime(iso: string) {
-  const d = new Date(iso);
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const startOfYesterday = new Date(startOfToday);
-  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
-
-  const pad2 = (n: number) => String(n).padStart(2, "0");
-  const hhmm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  if (d >= startOfToday) return hhmm;
-  if (d >= startOfYesterday) return `昨日 ${hhmm}`;
-  const ymd = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-  return `${ymd} ${hhmm}`;
-}
-
-function avatarLabel(name?: string | null) {
-  const s = (name || "?").trim();
-  return s ? s.slice(0, 1).toUpperCase() : "?";
-}
+import { avatarLabel, formatTime } from "./lib/chatUi";
+import {
+  absoluteAssetUrl,
+  deleteForumThread,
+  getSettingsState,
+  putAppearanceState,
+  putChannelsState,
+  putProfilesState,
+  wsUrl
+} from "./lib/api";
+import {
+  loadChannelsState,
+  parseChannelsStatePayload,
+  persistChannelsState,
+  type ChannelsState
+} from "./lib/channels";
 
 function conversationLabel(c: Conversation, profiles: ProfilesState) {
   if (c.kind === "broadcast") return "#broadcast";
+  if (c.kind === "forum") return c.title;
   if (c.kind === "dm_to_pc") {
     const pc = c.participants.find((p) => p.kind === "pc");
     if (!pc) return c.title;
@@ -67,24 +65,10 @@ function conversationLabel(c: Conversation, profiles: ProfilesState) {
   return c.title;
 }
 
-function nameStyleCss(profile: Profile | null): CSSProperties {
-  if (!profile) return {};
-  const font =
-    profile.nameStyle.font === "serif"
-      ? "ui-serif, Georgia, Cambria, \"Times New Roman\", Times, serif"
-      : profile.nameStyle.font === "mono"
-        ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace"
-        : "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-
-  if (profile.nameStyle.colorMode === "gradient") {
-    return {
-      fontFamily: font,
-      backgroundImage: `linear-gradient(90deg, ${profile.nameStyle.gradientFrom}, ${profile.nameStyle.gradientTo})`,
-      WebkitBackgroundClip: "text",
-      color: "transparent"
-    };
-  }
-  return { fontFamily: font, color: profile.nameStyle.solid };
+function conversationIcon(c: Conversation) {
+  if (c.kind === "broadcast") return <Hash size={16} />;
+  if (c.kind === "forum") return <List size={16} />;
+  return <MessageCircle size={16} />;
 }
 
 export default function App() {
@@ -108,14 +92,31 @@ export default function App() {
   const [profileViewer, setProfileViewer] = useState<{ actor: Actor; anchor: { x: number; y: number } | null } | null>(null);
   const [remoteSyncDone, setRemoteSyncDone] = useState(false);
 
+  const [channelsInit] = useState<ChannelsState>(() => loadChannelsState());
+  const [channels, setChannels] = useState<ChannelsState>(channelsInit);
+
+  const [activeForumThreadId, setActiveForumThreadId] = useState<string | null>(null);
+  const [forumDetailOnly, setForumDetailOnly] = useState(false);
+  const [forumThreadsByChannel, setForumThreadsByChannel] = useState<Record<string, ForumThread[]>>({});
+  const [forumPostsByThread, setForumPostsByThread] = useState<Record<string, Message[]>>({});
+  const [threadComposerContent, setThreadComposerContent] = useState("");
+  const [threadUiError, setThreadUiError] = useState<string | null>(null);
+
   const [userName] = useState("You");
   const [content, setContent] = useState("");
   const [uiError, setUiError] = useState<string | null>(null);
 
+  const [directSelectedPcIds, setDirectSelectedPcIds] = useState<string[]>([]);
+  const [directSelectionTouched, setDirectSelectionTouched] = useState(false);
+  const [threadDirectSelectedPcIds, setThreadDirectSelectedPcIds] = useState<string[]>([]);
+  const [threadDirectSelectionTouched, setThreadDirectSelectionTouched] = useState(false);
+
   const wsRef = useRef<ReturnType<typeof createWs> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const threadEndRef = useRef<HTMLDivElement | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const saveProfilesTimerRef = useRef<number | null>(null);
+  const saveChannelsTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     applyAppearance(appearance, customThemes);
@@ -129,7 +130,16 @@ export default function App() {
         if (p.kind === "pc" && p.id) byId.set(p.id, { id: p.id, name: p.name || p.id });
       }
     }
-    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const pcOrder = (id: string) => {
+      const m = id.match(/(\d+)\s*$/);
+      return m ? Number(m[1]) : Number.POSITIVE_INFINITY;
+    };
+    return [...byId.values()].sort((a, b) => {
+      const ao = pcOrder(a.id);
+      const bo = pcOrder(b.id);
+      if (ao !== bo) return ao - bo;
+      return a.id.localeCompare(b.id);
+    });
   }, [conversations]);
 
   const profileActors = useMemo(() => {
@@ -155,6 +165,10 @@ export default function App() {
   }, [profiles]);
 
   useEffect(() => {
+    persistChannelsState(channels);
+  }, [channels]);
+
+  useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
@@ -170,6 +184,10 @@ export default function App() {
         if (remote.profiles_state) {
           const parsed = parseProfilesPayload(remote.profiles_state);
           setProfiles((prev) => ({ byId: { ...prev.byId, ...parsed.byId } }));
+        }
+        if (remote.channels_state) {
+          const parsed = parseChannelsStatePayload(remote.channels_state);
+          if (parsed) setChannels(parsed);
         }
       } catch {
         // ignore (fallback to localStorage)
@@ -200,14 +218,35 @@ export default function App() {
     if (!remoteSyncDone) return;
     if (saveProfilesTimerRef.current) window.clearTimeout(saveProfilesTimerRef.current);
     saveProfilesTimerRef.current = window.setTimeout(() => {
-      void putProfilesState({ profiles: Object.values(profiles.byId) }).catch(() => {
-        // ignore
-      });
+      void putProfilesState({ profiles: Object.values(profiles.byId) })
+        .then(() => {
+          wsRef.current?.send({ type: "request_state" });
+        })
+        .catch(() => {
+          // ignore
+        });
     }, 600);
     return () => {
       if (saveProfilesTimerRef.current) window.clearTimeout(saveProfilesTimerRef.current);
     };
   }, [profiles, remoteSyncDone]);
+
+  useEffect(() => {
+    if (!remoteSyncDone) return;
+    if (saveChannelsTimerRef.current) window.clearTimeout(saveChannelsTimerRef.current);
+    saveChannelsTimerRef.current = window.setTimeout(() => {
+      void putChannelsState(channels)
+        .then(() => {
+          wsRef.current?.send({ type: "request_state" });
+        })
+        .catch(() => {
+          // ignore
+        });
+    }, 600);
+    return () => {
+      if (saveChannelsTimerRef.current) window.clearTimeout(saveChannelsTimerRef.current);
+    };
+  }, [channels, remoteSyncDone]);
 
   const pcIndex = useMemo(() => {
     const byId = new Map<string, { id: string; name: string }>();
@@ -219,20 +258,16 @@ export default function App() {
     return { byId, byName };
   }, [pcs]);
 
-  const broadcastConversations = useMemo(
-    () => conversations.filter((c) => c.kind === "broadcast"),
-    [conversations]
-  );
-  const directConversations = useMemo(
-    () => conversations.filter((c) => c.kind !== "broadcast"),
-    [conversations]
-  );
+  const channelConversations = useMemo(() => conversations.filter((c) => c.kind === "broadcast" || c.kind === "forum"), [conversations]);
+  const directConversations = useMemo(() => conversations.filter((c) => c.kind !== "broadcast" && c.kind !== "forum"), [conversations]);
 
   useEffect(() => {
     const { ws, send } = createWs(wsUrl(), (msg: WsServerToClient) => {
       if (msg.type === "state") {
         setConversations(msg.payload.conversations);
         setMessagesByConv(msg.payload.messages_by_conversation);
+        setForumThreadsByChannel(msg.payload.forum_threads_by_channel || {});
+        setForumPostsByThread(msg.payload.forum_posts_by_thread || {});
         return;
       }
       if (msg.type === "message") {
@@ -244,6 +279,27 @@ export default function App() {
           next[m.conversation_id] = list;
           return next;
         });
+        if (m.thread_id) {
+          setForumPostsByThread((prev) => {
+            const list = prev[m.thread_id!] ? [...prev[m.thread_id!]] : [];
+            list.push(m);
+            return { ...prev, [m.thread_id!]: list };
+          });
+          setForumThreadsByChannel((prev) => {
+            const threads = prev[m.conversation_id];
+            if (!threads) return prev;
+            const next = threads.map((t) =>
+              t.id === m.thread_id
+                ? {
+                    ...t,
+                    last_activity_at: m.timestamp,
+                    reply_count: Math.max(0, (t.reply_count || 0) + 1)
+                  }
+                : t
+            );
+            return { ...prev, [m.conversation_id]: next };
+          });
+        }
         return;
       }
       if (msg.type === "typing") {
@@ -275,11 +331,39 @@ export default function App() {
   }, [activeConvId, conversations]);
 
   useEffect(() => {
+    const conv = conversations.find((c) => c.id === activeConvId);
+    if (conv?.kind !== "forum") return;
+    setActiveForumThreadId(null);
+    setForumDetailOnly(false);
+  }, [activeConvId, conversations]);
+
+  useEffect(() => {
+    if (!activeForumThreadId) return;
+    const conv = conversations.find((c) => c.id === activeConvId);
+    if (conv?.kind !== "forum") return;
+    const threads = forumThreadsByChannel[conv.id] || [];
+    if (threads.some((t) => t.id === activeForumThreadId)) return;
+    setActiveForumThreadId(null);
+    setForumDetailOnly(false);
+  }, [activeConvId, activeForumThreadId, conversations, forumThreadsByChannel]);
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeConvId, messagesByConv[activeConvId]?.length]);
 
   const activeMessages = messagesByConv[activeConvId] || [];
   const activeConv = conversations.find((c) => c.id === activeConvId);
+  const forumThreadsRaw = activeConv?.kind === "forum" ? forumThreadsByChannel[activeConv.id] || [] : [];
+  const forumThreads = useMemo(
+    () => [...forumThreadsRaw].sort((a, b) => b.last_activity_at.localeCompare(a.last_activity_at)),
+    [forumThreadsRaw]
+  );
+  const activeForumThread = activeForumThreadId ? forumThreads.find((t) => t.id === activeForumThreadId) || null : null;
+  const activeForumPosts = activeForumThread ? forumPostsByThread[activeForumThread.id] || [] : [];
+
+  useEffect(() => {
+    threadEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activeForumThreadId, activeForumPosts.length]);
 
   const typingSet = typingByConv[activeConvId] || new Set<string>();
   const typingNames = pcs
@@ -287,53 +371,195 @@ export default function App() {
     .map((p) => p.name)
     .join("、");
 
-  const isDirectDraft = content.trim().toLowerCase().startsWith("/direct");
-  const canSend = connected && content.trim().length > 0;
+  const directDraft = useMemo(() => parseDirectDraft(content, pcIndex), [content, pcIndex]);
+  const isDirectDraft = directDraft.isDirect;
+  const directEffectivePcIds = [...new Set((directSelectedPcIds.length ? directSelectedPcIds : directDraft.typedPcIds).filter(Boolean))];
+  const canSend =
+    connected &&
+    (isDirectDraft ? directEffectivePcIds.length > 0 && directDraft.message.length > 0 : content.trim().length > 0);
 
-  function parseDirect(text: string): { ok: true; pcIds: string[]; message: string } | { ok: false; error: string } {
+  const threadDirectDraft = useMemo(() => parseDirectDraft(threadComposerContent, pcIndex), [threadComposerContent, pcIndex]);
+  const threadIsDirectDraft = threadDirectDraft.isDirect;
+  const threadDirectEffectivePcIds = [
+    ...new Set((threadDirectSelectedPcIds.length ? threadDirectSelectedPcIds : threadDirectDraft.typedPcIds).filter(Boolean))
+  ];
+  const canSendThreadPost =
+    connected &&
+    Boolean(activeConv?.kind === "forum" && activeForumThread) &&
+    (threadIsDirectDraft
+      ? threadDirectEffectivePcIds.length > 0 && threadDirectDraft.message.length > 0
+      : threadComposerContent.trim().length > 0);
+
+  useEffect(() => {
+    if (!isDirectDraft) {
+      if (directSelectedPcIds.length) setDirectSelectedPcIds([]);
+      if (directSelectionTouched) setDirectSelectionTouched(false);
+      return;
+    }
+    if (directSelectionTouched) return;
+    if (!directDraft.typedPcIds.length) return;
+    setDirectSelectedPcIds((prev) => (prev.join("|") === directDraft.typedPcIds.join("|") ? prev : directDraft.typedPcIds));
+  }, [directDraft.typedPcIds, directSelectionTouched, directSelectedPcIds.length, isDirectDraft]);
+
+  useEffect(() => {
+    if (!threadIsDirectDraft) {
+      if (threadDirectSelectedPcIds.length) setThreadDirectSelectedPcIds([]);
+      if (threadDirectSelectionTouched) setThreadDirectSelectionTouched(false);
+      return;
+    }
+    if (threadDirectSelectionTouched) return;
+    if (!threadDirectDraft.typedPcIds.length) return;
+    setThreadDirectSelectedPcIds((prev) =>
+      prev.join("|") === threadDirectDraft.typedPcIds.join("|") ? prev : threadDirectDraft.typedPcIds
+    );
+  }, [
+    threadDirectDraft.typedPcIds,
+    threadDirectSelectionTouched,
+    threadDirectSelectedPcIds.length,
+    threadIsDirectDraft
+  ]);
+
+  async function deleteThread(threadId: string) {
+    const ok = window.confirm("删除该 thread？其下帖子将一并删除。");
+    if (!ok) return;
+    try {
+      await deleteForumThread(threadId);
+      setForumPostsByThread((prev) => {
+        const next = { ...prev };
+        delete next[threadId];
+        return next;
+      });
+      setForumThreadsByChannel((prev) => {
+        const next: typeof prev = {};
+        for (const [channelId, threads] of Object.entries(prev)) {
+          next[channelId] = threads.filter((t) => t.id !== threadId);
+        }
+        return next;
+      });
+      if (activeForumThreadId === threadId) {
+        setActiveForumThreadId(null);
+        setForumDetailOnly(false);
+      }
+      wsRef.current?.send({ type: "request_state" });
+    } catch {
+      // ignore (keep UI as-is)
+    }
+  }
+
+  function sendThreadPost() {
+    if (!wsRef.current) return;
+    const text = threadComposerContent.trim();
+    if (!text) return;
+    if (!activeConv || activeConv.kind !== "forum") {
+      setThreadUiError("当前不在论坛频道");
+      return;
+    }
+    if (!activeForumThread) {
+      setThreadUiError("请先选择一个 thread");
+      return;
+    }
+    setThreadUiError(null);
+
+    const draft = parseDirectDraft(text, pcIndex);
+    if (draft.isDirect) {
+      const pcIds = [
+        ...new Set((threadDirectSelectedPcIds.length ? threadDirectSelectedPcIds : draft.typedPcIds).filter(Boolean))
+      ];
+      if (!pcIds.length) {
+        setThreadUiError("请选择至少一个私聊对象");
+        return;
+      }
+      if (!draft.message) {
+        setThreadUiError("请输入消息内容");
+        return;
+      }
+      wsRef.current.send({
+        type: "user_inject",
+        content: draft.message,
+        target: { kind: "direct", pc_ids: pcIds },
+        channel_id: activeConv.id,
+        thread_id: activeForumThread.id
+      });
+      setThreadComposerContent("");
+      setThreadDirectSelectedPcIds([]);
+      setThreadDirectSelectionTouched(false);
+      return;
+    }
+
+    wsRef.current.send({ type: "forum_post", channel_id: activeConv.id, thread_id: activeForumThread.id, content: text });
+    setThreadComposerContent("");
+  }
+
+  function parseDirectDraft(
+    text: string,
+    pcIndex: { byId: Map<string, { id: string; name: string }>; byName: Map<string, { id: string; name: string }> }
+  ): { isDirect: true; message: string; typedPcIds: string[] } | { isDirect: false; message: ""; typedPcIds: [] } {
     const trimmed = text.trim();
-    if (!trimmed.toLowerCase().startsWith("/direct")) return { ok: false, error: "not_direct" };
+    if (!trimmed.toLowerCase().startsWith("/direct")) return { isDirect: false, message: "", typedPcIds: [] };
     const rest = trimmed.slice("/direct".length).trim();
-    if (!rest) return { ok: false, error: "用法：/direct Alice 你好（可多个目标）" };
+
+    if (!rest) return { isDirect: true, message: "", typedPcIds: [] };
+
+    const lookupPcId = (token: string) => {
+      const normalized = token.trim().replace(/^@/, "");
+      if (!normalized) return null;
+      const key = normalized.toLowerCase();
+      const pc = pcIndex.byId.get(key) || pcIndex.byName.get(key);
+      return pc ? pc.id : null;
+    };
+
+    const parseTargetsLoose = (segment: string) => {
+      const ids: string[] = [];
+      for (const raw of segment.split(/[\s,，、]+/g)) {
+        const id = lookupPcId(raw);
+        if (id) ids.push(id);
+      }
+      return [...new Set(ids)];
+    };
+
+    const colonIndex = rest.search(/[:：]/);
+    if (colonIndex >= 0) {
+      const before = rest.slice(0, colonIndex).trim();
+      const after = rest.slice(colonIndex + 1).trim();
+      const typed = before ? parseTargetsLoose(before) : [];
+      if (!before || typed.length > 0) {
+        return { isDirect: true, message: after, typedPcIds: typed };
+      }
+    }
 
     const tokens = rest.split(/\s+/);
-    const pcIds: string[] = [];
+    const typedPcIds: string[] = [];
     let i = 0;
     while (i < tokens.length) {
       const t = tokens[i];
-      if (t === ":" || t === "：" || t === "--") {
+      if (t === "--") {
         i++;
         break;
       }
       const parts = t
-        .split(",")
+        .split(/[,\uFF0C，、]+/g)
         .map((x) => x.trim())
-        .filter(Boolean)
-        .map((x) => x.replace(/^@/, ""));
-
+        .filter(Boolean);
       if (!parts.length) break;
 
       const matched: string[] = [];
       let allMatch = true;
       for (const part of parts) {
-        const key = part.toLowerCase();
-        const pc = pcIndex.byId.get(key) || pcIndex.byName.get(key);
-        if (!pc) {
+        const id = lookupPcId(part);
+        if (!id) {
           allMatch = false;
           break;
         }
-        matched.push(pc.id);
+        matched.push(id);
       }
       if (!allMatch) break;
-      pcIds.push(...matched);
+      typedPcIds.push(...matched);
       i++;
     }
 
-    const message = tokens.slice(i).join(" ").replace(/^[:：]\s*/, "").trim();
-    const unique = [...new Set(pcIds)];
-    if (!unique.length) return { ok: false, error: "请在 /direct 后写目标，例如：/direct Alice 你好" };
-    if (!message) return { ok: false, error: "请在目标后写消息内容，例如：/direct Alice 你好" };
-    return { ok: true, pcIds: unique, message };
+    const uniqueTyped = [...new Set(typedPcIds)];
+    const message = uniqueTyped.length ? tokens.slice(i).join(" ").trim() : rest.trim();
+    return { isDirect: true, message, typedPcIds: uniqueTyped };
   }
 
   function sendInject() {
@@ -342,18 +568,25 @@ export default function App() {
     if (!text) return;
     setUiError(null);
 
-    const direct = parseDirect(text);
-    if (direct.ok) {
+    const draft = parseDirectDraft(text, pcIndex);
+    if (draft.isDirect) {
+      const pcIds = [...new Set((directSelectedPcIds.length ? directSelectedPcIds : draft.typedPcIds).filter(Boolean))];
+      if (!pcIds.length) {
+        setUiError("请选择至少一个私聊对象");
+        return;
+      }
+      if (!draft.message) {
+        setUiError("请输入消息内容");
+        return;
+      }
       wsRef.current.send({
         type: "user_inject",
-        content: direct.message,
-        target: { kind: "direct", pc_ids: direct.pcIds }
+        content: draft.message,
+        target: { kind: "direct", pc_ids: pcIds }
       });
       setContent("");
-      return;
-    }
-    if (!direct.ok && direct.error !== "not_direct") {
-      setUiError(direct.error);
+      setDirectSelectedPcIds([]);
+      setDirectSelectionTouched(false);
       return;
     }
 
@@ -395,14 +628,17 @@ export default function App() {
 
         <div className="convList" role="list">
           <div className="convGroup">
-            <div className="groupTitle">广播频道</div>
-            {broadcastConversations.map((c) => (
+            <div className="groupTitle">频道</div>
+            {channelConversations.map((c) => (
               <button
                 key={c.id}
                 className={`convItem ${c.id === activeConvId ? "active" : ""}`}
                 onClick={() => setActiveConvId(c.id)}
               >
-                {conversationLabel(c, profiles)}
+                <span className="convItemIcon" aria-hidden="true">
+                  {conversationIcon(c)}
+                </span>
+                <span className="convItemLabel">{conversationLabel(c, profiles)}</span>
               </button>
             ))}
           </div>
@@ -414,7 +650,10 @@ export default function App() {
                 className={`convItem ${c.id === activeConvId ? "active" : ""}`}
                 onClick={() => setActiveConvId(c.id)}
               >
-                {conversationLabel(c, profiles)}
+                <span className="convItemIcon" aria-hidden="true">
+                  {conversationIcon(c)}
+                </span>
+                <span className="convItemLabel">{conversationLabel(c, profiles)}</span>
               </button>
             ))}
           </div>
@@ -446,7 +685,6 @@ export default function App() {
             </button>
             <div className="userName">
               <div className="userNameMain">{userProfile?.nickname || userProfile?.displayName || userName}</div>
-              <div className="userNameSubName">{userProfile?.displayName || userName}</div>
               <div className="userNameSub">{connected ? "已连接" : "未连接"}</div>
             </div>
           </div>
@@ -470,76 +708,204 @@ export default function App() {
         <div className="topbar">
           <h1>{activeConv ? conversationLabel(activeConv, profiles) : activeConvId}</h1>
           <div className="controls">
-            <button onClick={() => setPaused(true)} disabled={!connected || queueState?.paused === true}>
-              暂停
+            <button
+              className="iconBtn iconOnly"
+              disabled={!connected || queueState?.paused === true}
+              onClick={() => {
+                setPaused(true)
+              }}
+              aria-label="暂停"
+              title="暂停"
+            >
+              <Pause size={18} />
             </button>
-            <button onClick={() => setPaused(false)} disabled={!connected || queueState?.paused === false}>
-              继续
+            <button
+              className="iconBtn iconOnly"
+              disabled={!connected || queueState?.paused === false}
+              onClick={() => {
+                setPaused(false)
+              }}
+              aria-label="暂停"
+              title="暂停"
+            >
+              <Play size={18} />
             </button>
           </div>
         </div>
 
-        <div className="messages">
-          {activeMessages.map((m) => {
-            const name = chatDisplayName(profiles, m.from_actor);
-            const p = getProfile(profiles, m.from_actor);
-            return (
-              <div key={m.id} className="msgRow">
-                <button className="avatarBtn" onClick={(e) => openProfile(m.from_actor, e)} title="查看资料">
-                  <div className="avatar" title={name}>
-                    {p?.avatarUrl ? (
-                      <img
-                        src={absoluteAssetUrl(p.avatarUrl)}
-                        alt={name}
-                        onError={(e) => ((e.currentTarget as HTMLImageElement).style.display = "none")}
-                      />
-                    ) : (
-                      avatarLabel(name)
-                    )}
-                  </div>
-                </button>
-                <div>
-                  <div className="msgHead">
-                    <div className="name" style={nameStyleCss(p)}>
-                      {name}
-                    </div>
-                    <div className="time">{formatTime(m.timestamp)}</div>
-                  </div>
-                  <div className="content">{m.content}</div>
+        {activeConv?.kind === "forum" ? (
+          <div className={`forumShell ${activeForumThread ? (forumDetailOnly ? "detailOnly" : "split") : ""}`}>
+            {forumDetailOnly && activeForumThread ? null : (
+              <div className="threadList">
+                <div className="threadListInner">
+                  {forumThreads.map((t) => {
+                    const posts = forumPostsByThread[t.id] || [];
+                    const last = posts.length ? posts[posts.length - 1] : null;
+                    return (
+                      <button
+                        key={t.id}
+                        className={`threadItem ${t.id === activeForumThreadId ? "active" : ""}`}
+                        onClick={() => {
+                          setActiveForumThreadId(t.id);
+                          setForumDetailOnly(false);
+                          setThreadUiError(null);
+                        }}
+                      >
+                        <div className="threadItemActions" role="toolbar" aria-label="thread 操作">
+                          <button
+                            className="threadActionBtn danger"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void deleteThread(t.id);
+                            }}
+                            aria-label="删除 thread"
+                            title="删除"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                        <div className="threadTitle">{t.title}</div>
+                        <div className="threadMeta">
+                          <span>{formatTime(t.last_activity_at)}</span>
+                          <span>·</span>
+                          <span>{t.reply_count} 回复</span>
+                        </div>
+                        {last ? <div className="threadPreview">{last.content}</div> : null}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
-            );
-          })}
-          <div ref={messagesEndRef} />
-        </div>
+            )}
 
-        {typingNames ? <div className="typing">… {typingNames} 正在输入…</div> : <div className="typing" />}
-
-        <div className="composer">
-          <div className="composerInner">
-            <div className="composerMeta">
-              <div className={`pill ${isDirectDraft ? "direct" : ""}`}>{isDirectDraft ? "direct" : "#broadcast"}</div>
-              <div className="hint">
-                私聊：<code>/direct</code> 例如 <code>/direct Alice 你好</code>（可多目标）
+            {activeForumThread ? (
+              <div className="threadDetail">
+                <div className="threadDetailHeader">
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <h2 className="threadDetailTitle">{activeForumThread.title}</h2>
+                      <div className="threadDetailSub">
+                        由 {chatDisplayName(profiles, activeForumThread.created_by)} 创建 · 更新 {formatTime(activeForumThread.last_activity_at)} ·{" "}
+                        {activeForumThread.reply_count} 回复
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flex: "0 0 auto" }}>
+                      <button
+                        className="smallBtn"
+                        onClick={() => {
+                          setForumDetailOnly((v) => !v);
+                        }}
+                      >
+                        {forumDetailOnly ? "显示列表" : "完整视图"}
+                      </button>
+                      <button
+                        className="iconBtn iconOnly"
+                        onClick={() => {
+                          setActiveForumThreadId(null);
+                          setForumDetailOnly(false);
+                        }}
+                        aria-label="返回"
+                        title="返回"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <ChatFlow
+                  messages={activeForumPosts}
+                  profiles={profiles}
+                  typingNames={typingNames}
+                  endRef={threadEndRef}
+                  onOpenProfile={(actor, e) => openProfile(actor, e)}
+                  composer={{
+                    className: "composer threadComposer",
+                    value: threadComposerContent,
+                    onChange: (next) => {
+                      setThreadComposerContent(next);
+                      if (threadUiError) setThreadUiError(null);
+                    },
+                    placeholder: connected
+                      ? threadIsDirectDraft
+                        ? "私聊内容…（/direct 后面写要发送的文字）"
+                        : "在 thread 下发言…"
+                      : "正在连接后端…",
+                    error: threadUiError,
+                    onClearError: () => {
+                      if (threadUiError) setThreadUiError(null);
+                    },
+                    canSend: canSendThreadPost,
+                    onSend: sendThreadPost,
+                    pill: {
+                      isDirect: threadIsDirectDraft,
+                      normalLabel: activeConv?.title || "",
+                      directSelectedCount: threadDirectSelectedPcIds.length
+                    },
+                    hint: (
+                      <>
+                        <span>
+                          发送：<code>⌘/Ctrl + Enter</code>
+                        </span>
+                        <span style={{ opacity: 0.85 }}>
+                          · 私聊：<code>/direct</code> 后勾选对象（或 <code>/direct Alice：你好</code>）
+                        </span>
+                      </>
+                    ),
+                    directPicker: {
+                      pcs,
+                      selectedPcIds: threadDirectSelectedPcIds,
+                      setSelectedPcIds: setThreadDirectSelectedPcIds,
+                      setSelectionTouched: setThreadDirectSelectionTouched
+                    }
+                  }}
+                />
               </div>
-            </div>
-            <textarea
-              value={content}
-              placeholder={connected ? "输入消息（默认广播）…" : "正在连接后端…"}
-              onChange={(e) => {
-                setContent(e.target.value);
-                if (uiError) setUiError(null);
-              }}
-              onKeyDown={(e) => {
-                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") sendInject();
-              }}
-            />
-            {uiError ? <div className="error">{uiError}</div> : null}
+            ) : null}
           </div>
-          <button className="primary sendBtn" onClick={sendInject} disabled={!canSend}>
-            发送
-          </button>
-        </div>
+        ) : (
+          <ChatFlow
+            messages={activeMessages}
+            profiles={profiles}
+            typingNames={typingNames}
+            endRef={messagesEndRef}
+            onOpenProfile={(actor, e) => openProfile(actor, e)}
+            composer={
+              activeConv?.kind === "dm_to_pc" || activeConv?.kind === "pc_to_pc"
+                ? undefined
+                : {
+                    value: content,
+                    onChange: (next) => {
+                      setContent(next);
+                      if (uiError) setUiError(null);
+                    },
+                    placeholder: connected
+                      ? isDirectDraft
+                        ? "私聊内容…（/direct 后面写要发送的文字）"
+                        : "输入消息（默认广播）…"
+                      : "正在连接后端…",
+                    error: uiError,
+                    onClearError: () => {
+                      if (uiError) setUiError(null);
+                    },
+                    canSend,
+                    onSend: sendInject,
+                    pill: { isDirect: isDirectDraft, normalLabel: "#broadcast", directSelectedCount: directSelectedPcIds.length },
+                    hint: (
+                      <>
+                        私聊：<code>/direct</code> 后勾选对象（或 <code>/direct Alice：你好</code>）
+                      </>
+                    ),
+                    directPicker: {
+                      pcs,
+                      selectedPcIds: directSelectedPcIds,
+                      setSelectedPcIds: setDirectSelectedPcIds,
+                      setSelectionTouched: setDirectSelectionTouched
+                    }
+                  }
+            }
+          />
+        )}
       </main>
 
       <SettingsModal
@@ -563,6 +929,13 @@ export default function App() {
             setAppearance={setAppearance}
             customThemes={customThemes}
             setCustomThemes={setCustomThemes}
+            onRequestClose={() => setSettingsOpen(false)}
+          />
+        ) : settingsTab === "channels" ? (
+          <ChannelsTab
+            open={settingsOpen}
+            channels={channels}
+            setChannels={setChannels}
             onRequestClose={() => setSettingsOpen(false)}
           />
         ) : settingsTab === "profile" ? (

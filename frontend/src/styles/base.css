@@ -20,7 +20,7 @@ a {
 }
 
 button {
-  border: 1px solid var(--border);
+  border: 0;
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
   padding: 8px 10px;

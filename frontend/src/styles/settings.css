@@ -17,7 +17,7 @@ html[data-theme="milktea"] .modalOverlay {
 
 .modal {
   width: min(980px, 100%);
-  height: 700px;
+  height: 720px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -34,7 +34,6 @@ html[data-theme="milktea"] .modalOverlay {
   padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
   min-height: 0;
   overflow: auto;
 }
@@ -43,12 +42,11 @@ html[data-theme="milktea"] .modalOverlay {
   font-weight: 900;
   letter-spacing: 0.2px;
   padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.02);
 }
 
 .navItem {
+  border: 0;
+  background: transparent;
   width: 100%;
   text-align: left;
   border-radius: 12px;
@@ -63,7 +61,6 @@ html[data-theme="milktea"] .modalOverlay {
 .navExpand {
   margin-top: 4px;
   padding-top: 10px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
 .navSubTitle {
@@ -83,11 +80,10 @@ html[data-theme="milktea"] .modalOverlay {
 
 .profileNavList {
   display: grid;
-  gap: 6px;
 }
 
 .modalMain {
-  height: 700px;
+  height: 720px;
   display: grid;
   grid-template-rows: auto 1fr;
   min-width: 0;
@@ -96,7 +92,6 @@ html[data-theme="milktea"] .modalOverlay {
 
 .modalHeader {
   padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -108,7 +103,7 @@ html[data-theme="milktea"] .modalOverlay {
 }
 
 .modalContent {
-  padding: 14px;
+  padding: 14px 120px;
   overflow: auto;
 }
 
@@ -126,7 +121,7 @@ html[data-theme="milktea"] .modalOverlay {
   grid-template-columns: auto 1fr;
   gap: 10px;
   align-items: center;
-  padding: 10px;
+  padding: 6px;
   border-radius: 12px;
   border: 1px solid transparent;
   background: transparent;
@@ -171,8 +166,7 @@ html[data-theme="milktea"] .modalOverlay {
 .profileTabPreviewFixed {
   position: absolute;
   right: 18px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 15%;
   width: 340px;
   display: flex;
   justify-content: center;
@@ -284,7 +278,7 @@ html[data-theme="milktea"] .modalOverlay {
 
 .themeGrid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -314,9 +308,11 @@ html[data-theme="milktea"] .modalOverlay {
 }
 
 .themeCard {
+  aspect-ratio: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 10px;
   width: 100%;
   padding: 10px;
@@ -334,12 +330,6 @@ html[data-theme="milktea"] .modalOverlay {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
-.themeCardLabel {
-  font-size: 12px;
-  font-weight: 800;
-  color: var(--text);
-}
-
 .customThemeActions {
   display: inline-flex;
   align-items: center;
@@ -348,7 +338,7 @@ html[data-theme="milktea"] .modalOverlay {
 
 .customThemeGrid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -360,10 +350,11 @@ html[data-theme="milktea"] .modalOverlay {
 }
 
 .customThemeCard {
+  aspect-ratio: 1;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-rows: auto 1fr auto;
   gap: 10px;
-  align-items: center;
+  justify-content: center;
   width: 100%;
   padding: 10px;
   border-radius: 12px;
@@ -381,15 +372,6 @@ html[data-theme="milktea"] .modalOverlay {
 
 .customThemeCard.active {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.customThemeName {
-  font-size: 12px;
-  font-weight: 900;
-  text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .tag {
@@ -475,4 +457,81 @@ html[data-theme="milktea"] .modalOverlay {
 .customHint {
   color: var(--muted);
   font-size: 12px;
+}
+
+.channelsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.channelsList {
+  display: grid;
+  gap: 8px;
+}
+
+.channelsRow {
+  display: grid;
+  grid-template-columns: 180px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.channelsFields {
+  display: grid;
+  gap: 8px;
+}
+
+.channelsId {
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channelsDescBlock {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.channelsDescLabel {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.channelsTextarea {
+  min-height: 64px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.channelsHint {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 840px) {
+  .channelsRow {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "id del"
+      "title del";
+  }
+  .channelsId {
+    grid-area: id;
+  }
+  .channelsRow .channelsFields {
+    grid-area: title;
+  }
 }

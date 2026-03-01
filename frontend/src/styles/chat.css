@@ -77,7 +77,6 @@
 
 .composer {
   background: var(--panel);
-  border-top: 1px solid var(--border);
   padding: 12px;
   display: grid;
   grid-template-columns: 1fr auto;
@@ -112,6 +111,75 @@
   margin-bottom: 6px;
 }
 
+.directPicker {
+  margin: 6px 0 8px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.directPickerHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.directPickerTitle {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text);
+  opacity: 0.9;
+}
+
+.directPickerActions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.directPickerList {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  max-height: 120px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.directPickerEmpty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.directPickerItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  user-select: none;
+}
+
+.directPickerItem.checked {
+  background: color-mix(in srgb, var(--accent) 18%, rgba(255, 255, 255, 0.04));
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.directPickerItem input {
+  margin: 0;
+}
+
+.directPickerName {
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -140,4 +208,3 @@
   color: var(--muted);
   font-size: 12px;
 }
-

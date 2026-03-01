@@ -24,7 +24,7 @@ export const PRESET_OPTIONS: Array<{ id: PresetThemeId; label: string; swatches:
   { id: "gray", label: "灰", swatches: ["#f2f3f5", "#ffffff", "#99aab5"] },
   { id: "darkgray", label: "深灰（默认）", swatches: ["#0f1115", "#151823", "#5865f2"] },
   { id: "black", label: "黑", swatches: ["#05060a", "#0b0d14", "#7c3aed"] },
-  { id: "milktea", label: "奶茶", swatches: ["#f3efe7", "#ffffff", "#b7791f"] },
+  { id: "milktea", label: "奶茶", swatches: ["#f3efe7", "#faf6f0", "#b7791f"] },
   { id: "colorful", label: "多彩", swatches: ["#0b1220", "#111827", "#22c55e"] }
 ];
 

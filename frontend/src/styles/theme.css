@@ -41,7 +41,7 @@ html[data-theme="black"] {
 
 html[data-theme="milktea"] {
   --bg: #f3efe7;
-  --panel: #ffffff;
+  --panel: #faf6f0;
   --panel2: #faf6ef;
   --text: #2b2115;
   --muted: #6b5a45;

@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { Send } from "lucide-react";
 import { useMemo, useState, type CSSProperties } from "react";
 import type { Actor } from "../types";
 import type { Profile, ProfilesState } from "../lib/profiles";
@@ -106,12 +106,11 @@ export default function ProfileCard(props: {
           <div className="profileTopRow">
             <div className="profileNames">
               <div className="profileNick" style={nameStyleCss(profile)}>
-                {subtitle}
+                {title}
               </div>
-              <div className="profileName">{title}</div>
+              <div className="profileName" style={{ color: profile?.panelTextColor || "var(--muted)"}}>{subtitle}</div>
               {profile?.tags?.length ? (
                 <div className="profileTagsBlock">
-                  <div className="profileTagsTitle">身份组</div>
                   <div className="profileTags">
                     {profile.tags.map((t) => (
                       <span key={t} className="tagPill">
@@ -122,19 +121,15 @@ export default function ProfileCard(props: {
                 </div>
               ) : null}
             </div>
-            <button className="iconBtn iconOnly" onClick={props.onClose} aria-label="关闭" title="关闭">
-              <X size={16} />
-            </button>
           </div>
 
           {isPc ? (
             <div className="profileDm">
-              <div className="profileDmLabel">私信</div>
               <div className="profileDmRow">
                 <input
                   className="profileDmInput"
                   value={dmText}
-                  placeholder={props.canDmPc ? `发给 ${subtitle}…` : "未连接"}
+                  placeholder={props.canDmPc ? `私信 ${subtitle}…` : "未连接"}
                   disabled={!props.canDmPc}
                   onChange={(e) => setDmText(e.target.value)}
                   onKeyDown={(e) => {
@@ -156,8 +151,10 @@ export default function ProfileCard(props: {
                     props.onDmPc(pcId, t);
                     setDmText("");
                   }}
+                  aria-label="发送"
+                  title="发送"
                 >
-                  发送
+                  <Send size={18} />
                 </button>
               </div>
               <div className="profileDmHint">提示：这会通过 DM 转发给 PC（等同于 direct）。</div>
