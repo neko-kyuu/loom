@@ -24,3 +24,14 @@ env.bak/
 
 # other
 plan/
+
+# Frontend (Vite/React)
+node_modules/
+dist/
+.vite/
+
+# Backend (Python/FastAPI)
+.ruff_cache/
+.pytest_cache/
+*.sqlite
+*.sqlite3
