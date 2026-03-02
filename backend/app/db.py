@@ -29,6 +29,19 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv_time
 CREATE INDEX IF NOT EXISTS idx_messages_thread_time
   ON messages(thread_id, timestamp);
 
+CREATE TABLE IF NOT EXISTS llm_logs (
+  id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  model TEXT,
+  request_json TEXT NOT NULL,
+  response_json TEXT,
+  status_code INTEGER,
+  error TEXT,
+  duration_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_llm_logs_created_at
+  ON llm_logs(created_at);
+
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
   timestamp TEXT NOT NULL,
@@ -218,6 +231,39 @@ class SqliteStore:
                 (event.id, event.timestamp, event.model_dump_json()),
             )
             await db.commit()
+
+    async def add_llm_log(
+        self,
+        *,
+        log_id: str,
+        created_at: str,
+        model: str | None,
+        request_json: str,
+        response_json: str | None,
+        status_code: int | None,
+        error: str | None,
+        duration_ms: int | None,
+    ) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                "INSERT INTO llm_logs(id, created_at, model, request_json, response_json, status_code, error, duration_ms) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (log_id, created_at, model, request_json, response_json, status_code, error, duration_ms),
+            )
+            await db.commit()
+
+    async def list_llm_logs(self, limit: int = 200) -> list[dict]:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, created_at, model, request_json, response_json, status_code, error, duration_ms "
+                "FROM llm_logs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cur.fetchall()
+        logs = [dict(r) for r in rows]
+        logs.reverse()
+        return logs
 
     async def list_events(self, limit: int = 200) -> list[Event]:
         async with aiosqlite.connect(self._path) as db:
