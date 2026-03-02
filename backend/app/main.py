@@ -422,14 +422,21 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         await websocket.send_json({"type": "error", "payload": {"message": "origin thread not found"}})
                         continue
 
-                # 1) user -> DM message (always goes to broadcast for visibility in demo)
+                kind = target.get("kind") if isinstance(target, dict) else None
+                user_msg_channel = "direct" if kind == "direct" else "broadcast"
+                send_batch_id = engine.new_send_batch_id() if kind == "direct" else None
+
+                # 1) user -> DM message
+                # NOTE: We still store it in the origin conversation/thread (or "broadcast" by default)
+                # for traceability/visibility, but the `channel` reflects whether it's a direct DM intent.
                 user_msg = Message(
                     conversation_id=origin_channel_id or "broadcast",
-                    channel="broadcast",
+                    channel=user_msg_channel,
                     thread_id=origin_thread_id or None,
                     from_actor=Actor(kind="user", id="user", name="You"),
                     to=[Actor(kind="dm", id="dm", name="DM")],
                     content=content,
+                    send_batch_id=send_batch_id,
                 )
                 await store.add_message(user_msg)
                 await ws_manager.broadcast({"type": "message", "payload": user_msg.model_dump()})
@@ -443,7 +450,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         await store.upsert_forum_threads([thread])
 
                 # 2) DM routes message: broadcast or per-PC direct copies
-                kind = target.get("kind") if isinstance(target, dict) else None
                 if kind == "direct":
                     pc_ids = target.get("pc_ids") or []
                     if not isinstance(pc_ids, list) or not pc_ids:
@@ -451,7 +457,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             {"type": "error", "payload": {"message": "target.pc_ids is required"}}
                         )
                         continue
-                    send_batch_id = engine.new_send_batch_id()
                     for pc_id in pc_ids:
                         conv_id = f"dm_to_{pc_id}"
                         dm_msg = Message(

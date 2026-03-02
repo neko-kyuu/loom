@@ -71,10 +71,32 @@ function conversationIcon(c: Conversation) {
   return <MessageCircle size={16} />;
 }
 
+function buildDmTargetsByBatchId(messagesByConversation: Record<string, Message[]>): Record<string, string[]> {
+  const byBatch: Record<string, Set<string>> = {};
+  for (const msgs of Object.values(messagesByConversation)) {
+    for (const m of msgs) {
+      const batchId = m.send_batch_id;
+      if (!batchId) continue;
+      const pcIds = (m.to || [])
+        .filter((a) => a.kind === "pc" && Boolean(a.id))
+        .map((a) => a.id!)
+        .filter(Boolean);
+      if (!pcIds.length) continue;
+      if (!byBatch[batchId]) byBatch[batchId] = new Set<string>();
+      for (const pcId of pcIds) byBatch[batchId].add(pcId);
+    }
+  }
+  const out: Record<string, string[]> = {};
+  for (const [batchId, set] of Object.entries(byBatch)) out[batchId] = [...set.values()];
+  return out;
+}
+
 export default function App() {
   const [connected, setConnected] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messagesByConv, setMessagesByConv] = useState<Record<string, Message[]>>({});
+  const [dmTargetsByBatchId, setDmTargetsByBatchId] = useState<Record<string, string[]>>({});
+  const [pendingScroll, setPendingScroll] = useState<{ conversationId: string; sendBatchId: string } | null>(null);
   const [activeConvId, setActiveConvId] = useState<string>("broadcast");
   const [typingByConv, setTypingByConv] = useState<Record<string, Set<string>>>({});
   const [queueState, setQueueState] = useState<{ paused: boolean; queued: number } | null>(null);
@@ -261,11 +283,18 @@ export default function App() {
   const channelConversations = useMemo(() => conversations.filter((c) => c.kind === "broadcast" || c.kind === "forum"), [conversations]);
   const directConversations = useMemo(() => conversations.filter((c) => c.kind !== "broadcast" && c.kind !== "forum"), [conversations]);
 
+  function jumpToDm(pcId: string, sendBatchId: string) {
+    const convId = `dm_to_${pcId}`;
+    setActiveConvId(convId);
+    setPendingScroll({ conversationId: convId, sendBatchId });
+  }
+
   useEffect(() => {
     const { ws, send } = createWs(wsUrl(), (msg: WsServerToClient) => {
       if (msg.type === "state") {
         setConversations(msg.payload.conversations);
         setMessagesByConv(msg.payload.messages_by_conversation);
+        setDmTargetsByBatchId(buildDmTargetsByBatchId(msg.payload.messages_by_conversation));
         setForumThreadsByChannel(msg.payload.forum_threads_by_channel || {});
         setForumPostsByThread(msg.payload.forum_posts_by_thread || {});
         return;
@@ -279,6 +308,27 @@ export default function App() {
           next[m.conversation_id] = list;
           return next;
         });
+        if (m.send_batch_id) {
+          const pcIds = (m.to || [])
+            .filter((a) => a.kind === "pc" && Boolean(a.id))
+            .map((a) => a.id!)
+            .filter(Boolean);
+          if (pcIds.length) {
+            setDmTargetsByBatchId((prev) => {
+              let changed = false;
+              const existing = prev[m.send_batch_id!] || [];
+              const set = new Set(existing);
+              for (const pcId of pcIds) {
+                if (!set.has(pcId)) {
+                  set.add(pcId);
+                  changed = true;
+                }
+              }
+              if (!changed) return prev;
+              return { ...prev, [m.send_batch_id!]: [...set.values()] };
+            });
+          }
+        }
         if (m.thread_id) {
           setForumPostsByThread((prev) => {
             const list = prev[m.thread_id!] ? [...prev[m.thread_id!]] : [];
@@ -825,6 +875,12 @@ export default function App() {
                   typingNames={typingNames}
                   endRef={threadEndRef}
                   onOpenProfile={(actor, e) => openProfile(actor, e)}
+                  dmTargetsByBatchId={dmTargetsByBatchId}
+                  onJumpToDm={jumpToDm}
+                  scrollToSendBatchId={
+                    pendingScroll && pendingScroll.conversationId === activeConvId ? pendingScroll.sendBatchId : null
+                  }
+                  onClearScrollToSendBatchId={() => setPendingScroll(null)}
                   composer={{
                     className: "composer threadComposer",
                     value: threadComposerContent,
@@ -876,6 +932,12 @@ export default function App() {
             typingNames={typingNames}
             endRef={messagesEndRef}
             onOpenProfile={(actor, e) => openProfile(actor, e)}
+            dmTargetsByBatchId={dmTargetsByBatchId}
+            onJumpToDm={jumpToDm}
+            scrollToSendBatchId={
+              pendingScroll && pendingScroll.conversationId === activeConvId ? pendingScroll.sendBatchId : null
+            }
+            onClearScrollToSendBatchId={() => setPendingScroll(null)}
             composer={
               activeConv?.kind === "dm_to_pc" || activeConv?.kind === "pc_to_pc"
                 ? undefined
