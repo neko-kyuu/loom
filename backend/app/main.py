@@ -464,7 +464,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     if len(pc_ids) == 1 and isinstance(pc_ids[0], str):
                         pc_target = next((p for p in engine.pcs if p.id == pc_ids[0]), None)
                     try:
-                        dm_content = await engine.dm_forward(content=content, pc=pc_target)
+                        dm_content = await engine.dm_forward(
+                            content=content,
+                            pc=pc_target,
+                            conversation_id=origin_channel_id or "broadcast",
+                            thread_id=origin_thread_id or None,
+                        )
                     except Exception:  # noqa: BLE001
                         dm_content = content
 
@@ -494,7 +499,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         await asyncio.gather(*enqueue_tasks)
                 else:
                     try:
-                        dm_content = await engine.dm_forward(content=content, pc=None)
+                        dm_content = await engine.dm_forward(
+                            content=content,
+                            pc=None,
+                            conversation_id=origin_channel_id or "broadcast",
+                            thread_id=origin_thread_id or None,
+                        )
                     except Exception:  # noqa: BLE001
                         dm_content = content
                     dm_msg = Message(

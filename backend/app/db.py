@@ -22,12 +22,15 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id TEXT NOT NULL,
   timestamp TEXT NOT NULL,
   thread_id TEXT,
+  send_batch_id TEXT,
   payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv_time
   ON messages(conversation_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_time
   ON messages(thread_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_send_batch
+  ON messages(send_batch_id, timestamp);
 
 CREATE TABLE IF NOT EXISTS llm_logs (
   id TEXT PRIMARY KEY,
@@ -93,6 +96,11 @@ class SqliteStore:
         if "thread_id" not in col_names:
             await db.execute("ALTER TABLE messages ADD COLUMN thread_id TEXT")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_time ON messages(thread_id, timestamp)")
+        if "send_batch_id" not in col_names:
+            await db.execute("ALTER TABLE messages ADD COLUMN send_batch_id TEXT")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_send_batch ON messages(send_batch_id, timestamp)"
+            )
 
     async def upsert_conversations(self, conversations: Iterable[Conversation]) -> None:
         rows = [(c.id, c.model_dump_json()) for c in conversations]
@@ -132,12 +140,14 @@ class SqliteStore:
     async def add_message(self, message: Message) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(
-                "INSERT INTO messages(id, conversation_id, timestamp, thread_id, payload) VALUES(?, ?, ?, ?, ?)",
+                "INSERT INTO messages(id, conversation_id, timestamp, thread_id, send_batch_id, payload) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
                 (
                     message.id,
                     message.conversation_id,
                     message.timestamp,
                     message.thread_id,
+                    message.send_batch_id,
                     message.model_dump_json(),
                 ),
             )
@@ -146,12 +156,14 @@ class SqliteStore:
     async def add_message_ignore(self, message: Message) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(
-                "INSERT OR IGNORE INTO messages(id, conversation_id, timestamp, thread_id, payload) VALUES(?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO messages(id, conversation_id, timestamp, thread_id, send_batch_id, payload) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
                 (
                     message.id,
                     message.conversation_id,
                     message.timestamp,
                     message.thread_id,
+                    message.send_batch_id,
                     message.model_dump_json(),
                 ),
             )
@@ -177,6 +189,30 @@ class SqliteStore:
                 "SELECT payload FROM messages WHERE thread_id=? "
                 "ORDER BY timestamp DESC LIMIT ?",
                 (thread_id, limit),
+            )
+            rows = await cur.fetchall()
+        msgs = [Message.model_validate_json(r["payload"]) for r in rows]
+        msgs.reverse()
+        return msgs
+
+    async def list_messages_by_send_batch_id(self, send_batch_id: str, limit: int = 500) -> list[Message]:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT payload FROM messages WHERE send_batch_id=? ORDER BY timestamp DESC LIMIT ?",
+                (send_batch_id, limit),
+            )
+            rows = await cur.fetchall()
+        msgs = [Message.model_validate_json(r["payload"]) for r in rows]
+        msgs.reverse()
+        return msgs
+
+    async def list_recent_messages(self, limit: int = 200) -> list[Message]:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT payload FROM messages ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
             )
             rows = await cur.fetchall()
         msgs = [Message.model_validate_json(r["payload"]) for r in rows]

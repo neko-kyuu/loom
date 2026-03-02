@@ -86,6 +86,30 @@ class DemoEngine:
                 persona if isinstance(persona, str) and persona.strip() else f"你是{pc.name}。回复简短明确。"
             )
 
+    @staticmethod
+    def _history_speaker_name(m: Message) -> str:
+        if m.from_actor.kind == "user":
+            return "用户"
+        if m.from_actor.kind == "dm":
+            return "DM"
+        return m.from_actor.name or m.from_actor.id or m.from_actor.kind
+
+    @classmethod
+    def _format_history_as_table(cls, history: list[Message], limit: int = 40) -> str:
+        lines = ['|发言人name（用户固定“用户”，DM固定“DM”|发言内容']
+        for m in history[-limit:]:
+            speaker = cls._history_speaker_name(m)
+            content = (m.content or "").strip()
+            if not content:
+                continue
+            content = content.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+            content = content.replace("|", "\\|")
+            speaker = speaker.replace("|", "\\|")
+            if len(content) > 800:
+                content = content[:800] + "…"
+            lines.append(f"|{speaker}|{content}")
+        return "\n".join(lines)
+
     def apply_profiles_state(self, profiles_state: Any) -> None:
         """
         Sync PC display names from frontend profiles_state payload.
@@ -236,7 +260,14 @@ class DemoEngine:
     def _fake_pc_reply(self, pc: PC, prompt: str) -> str:
         return f"{pc.name}：收到。({prompt})"
 
-    async def dm_forward(self, *, content: str, pc: PC | None) -> str:
+    async def dm_forward(
+        self,
+        *,
+        content: str,
+        pc: PC | None,
+        conversation_id: str,
+        thread_id: str | None,
+    ) -> str:
         """
         Convert user's message into a DM message (optionally tailored to a specific PC).
         """
@@ -247,10 +278,19 @@ class DemoEngine:
 
         target_hint = f"面向 {pc.name}" if pc is not None else "面向所有PC"
         system = (self.dm.persona or "").strip() or "你是DM。"
+        if thread_id:
+            history = await self._store.list_messages_by_thread(thread_id, limit=200)
+        else:
+            history = await self._store.list_messages(conversation_id, limit=200)
+        history_text = self._format_history_as_table(history, limit=60)
         messages = [
             {
                 "role": "system",
-                "content": f"{system}\n{target_hint}。把用户的话转述/整理成你要对PC说的话；简短明确，不要复述提示词。",
+                "content": (
+                    f"{system}\n\n"
+                    f"以下为最近对话记录：\n{history_text}\n\n"
+                    f"{target_hint}。把用户的话转述/整理成你要对PC说的话；简短明确，不要复述提示词。"
+                ),
             },
             {"role": "user", "content": content},
         ]
@@ -284,24 +324,20 @@ class DemoEngine:
         if not (self._settings.openai_base_url and self._settings.openai_api_key and job.pc.model):
             return self._fake_pc_reply(job.pc, job.prompt)
 
-        history = await self._store.list_messages(job.conversation_id, limit=30)
-        messages: list[dict[str, Any]] = []
+        if job.thread_id:
+            history = await self._store.list_messages_by_thread(job.thread_id, limit=200)
+        else:
+            history = await self._store.list_messages(job.conversation_id, limit=200)
+        history = await self._filter_private_history_for_pc(history, pc_id=job.pc.id)
         system = (job.pc.persona or "").strip() or "你是一个PC角色。"
-        messages.append({"role": "system", "content": f"{system}\n你只需用一段简短中文回复。"})
-
-        for m in history[-20:]:
-            if m.from_actor.kind == "pc" and m.from_actor.id == job.pc.id:
-                role = "assistant"
-                content = m.content
-            else:
-                role = "user"
-                name = m.from_actor.name or m.from_actor.id or m.from_actor.kind
-                content = m.content if m.from_actor.kind in {"dm", "user"} else f"{name}：{m.content}"
-            if isinstance(content, str) and content.strip():
-                messages.append({"role": role, "content": content.strip()})
-
-        if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != job.prompt:
-            messages.append({"role": "user", "content": job.prompt})
+        history_text = self._format_history_as_table(history, limit=40)
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": f"{system}\n\n以下为对话记录：\n{history_text}\n\n你只需用一段简短中文回复。",
+            },
+            {"role": "user", "content": job.prompt},
+        ]
 
         url = openai_chat_completions_url(self._settings.openai_base_url)
         res = await self._llm.chat(
@@ -325,6 +361,42 @@ class DemoEngine:
             return json.dumps(p2["structured"], ensure_ascii=False)
         except Exception:  # noqa: BLE001
             return self._fake_pc_reply(job.pc, job.prompt)
+
+    async def _filter_private_history_for_pc(self, history: list[Message], *, pc_id: str) -> list[Message]:
+        """
+        Privacy rule:
+        - Any message with channel="direct" may only appear in the LLM request body for its private target PC(s).
+        - Targets are resolved by looking up all DB rows with the same send_batch_id and collecting payload.to pc ids.
+        """
+        private_conv_id = f"dm_to_{pc_id}"
+        targets_by_batch: dict[str, set[str]] = {}
+        out: list[Message] = []
+        for m in history:
+            if m.channel != "direct":
+                out.append(m)
+                continue
+
+            if m.conversation_id == private_conv_id:
+                out.append(m)
+                continue
+
+            sbid = m.send_batch_id
+            if not isinstance(sbid, str) or not sbid.strip():
+                continue
+
+            targets = targets_by_batch.get(sbid)
+            if targets is None:
+                rows = await self._store.list_messages_by_send_batch_id(sbid, limit=200)
+                targets = set()
+                for r in rows:
+                    for a in r.to or []:
+                        if a.kind == "pc" and isinstance(a.id, str) and a.id.strip():
+                            targets.add(a.id.strip())
+                targets_by_batch[sbid] = targets
+
+            if pc_id in targets:
+                out.append(m)
+        return out
 
     @staticmethod
     def new_send_batch_id() -> str:

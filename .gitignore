@@ -35,4 +35,7 @@ dist/
 .pytest_cache/
 *.sqlite
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
 config.json
