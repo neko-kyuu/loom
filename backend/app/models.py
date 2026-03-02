@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -72,6 +72,38 @@ class Event(BaseModel):
     summary: str
     visibility: Literal["public", "private"] = "public"
     consequences: dict = Field(default_factory=dict)
+
+
+class TickRecord(BaseModel):
+    """
+    A single discrete-time turn/tick execution record.
+
+    Note: Stored as indexed columns in SQLite (not embedded in messages payload),
+    so we can query efficiently for digest/debugging.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    started_at: str = Field(default_factory=utc_now_iso)
+    pc_id: str
+    status: Literal["running", "done", "failed"] = "running"
+    action: dict[str, Any] = Field(default_factory=dict)
+    result_refs: list[dict[str, Any]] = Field(default_factory=list)
+    duration_ms: int | None = None
+    error: str | None = None
+
+
+class PcActivity(BaseModel):
+    """
+    A compact per-PC activity index entry for `recall(pc_id, since=...)`.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    pc_id: str
+    timestamp: str = Field(default_factory=utc_now_iso)
+    kind: str
+    summary: str
+    ref_type: str | None = None
+    ref_id: str | None = None
 
 
 class WsClientToServer(BaseModel):

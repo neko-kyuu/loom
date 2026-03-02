@@ -11,7 +11,7 @@
 
 ## 目录约定
 
-- `plan/`：需求/设计草案（不保证纳入版本控制）。
+- `plan/`：需求/设计草案（不纳入版本控制）。当前开发方向见 `demo-direction-forum-queue.md`与`forum-technique.md`
 - `backend/`：Python/FastAPI + WebSocket + SQLite。
 - `frontend/`：React + Vite。
 

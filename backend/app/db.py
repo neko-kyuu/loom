@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 import aiosqlite
 
-from .models import Conversation, Event, ForumThread, Message
+from .models import Conversation, Event, ForumThread, Message, PcActivity, TickRecord
 
 
 SCHEMA_SQL = """
@@ -61,6 +61,33 @@ CREATE TABLE IF NOT EXISTS forum_threads (
 );
 CREATE INDEX IF NOT EXISTS idx_forum_threads_channel
   ON forum_threads(channel_id, created_at);
+
+CREATE TABLE IF NOT EXISTS ticks (
+  id TEXT PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  pc_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  action_json TEXT NOT NULL,
+  result_refs_json TEXT NOT NULL,
+  duration_ms INTEGER,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ticks_started_at
+  ON ticks(started_at);
+CREATE INDEX IF NOT EXISTS idx_ticks_pc_started_at
+  ON ticks(pc_id, started_at);
+
+CREATE TABLE IF NOT EXISTS pc_activity (
+  id TEXT PRIMARY KEY,
+  pc_id TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  ref_type TEXT,
+  ref_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pc_activity_pc_time
+  ON pc_activity(pc_id, timestamp);
 
 CREATE TABLE IF NOT EXISTS kv_settings (
   key TEXT PRIMARY KEY,
@@ -259,6 +286,134 @@ class SqliteStore:
             await db.execute("DELETE FROM forum_threads WHERE id=?", (thread_id,))
             await db.execute("DELETE FROM messages WHERE thread_id=?", (thread_id,))
             await db.commit()
+
+    async def upsert_tick(self, tick: TickRecord) -> None:
+        """
+        Insert/update a tick execution record.
+        """
+        import json
+
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                "INSERT INTO ticks(id, started_at, pc_id, status, action_json, result_refs_json, duration_ms, error) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "started_at=excluded.started_at, pc_id=excluded.pc_id, status=excluded.status, "
+                "action_json=excluded.action_json, result_refs_json=excluded.result_refs_json, "
+                "duration_ms=excluded.duration_ms, error=excluded.error",
+                (
+                    tick.id,
+                    tick.started_at,
+                    tick.pc_id,
+                    tick.status,
+                    json.dumps(tick.action, ensure_ascii=False),
+                    json.dumps(tick.result_refs, ensure_ascii=False),
+                    tick.duration_ms,
+                    tick.error,
+                ),
+            )
+            await db.commit()
+
+    async def get_tick(self, tick_id: str) -> TickRecord | None:
+        import json
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, started_at, pc_id, status, action_json, result_refs_json, duration_ms, error "
+                "FROM ticks WHERE id=?",
+                (tick_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return TickRecord(
+            id=row["id"],
+            started_at=row["started_at"],
+            pc_id=row["pc_id"],
+            status=row["status"],
+            action=json.loads(row["action_json"] or "{}"),
+            result_refs=json.loads(row["result_refs_json"] or "[]"),
+            duration_ms=row["duration_ms"],
+            error=row["error"],
+        )
+
+    async def list_ticks(self, limit: int = 200) -> list[TickRecord]:
+        import json
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, started_at, pc_id, status, action_json, result_refs_json, duration_ms, error "
+                "FROM ticks ORDER BY started_at DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cur.fetchall()
+        out = [
+            TickRecord(
+                id=r["id"],
+                started_at=r["started_at"],
+                pc_id=r["pc_id"],
+                status=r["status"],
+                action=json.loads(r["action_json"] or "{}"),
+                result_refs=json.loads(r["result_refs_json"] or "[]"),
+                duration_ms=r["duration_ms"],
+                error=r["error"],
+            )
+            for r in rows
+        ]
+        out.reverse()
+        return out
+
+    async def add_pc_activity(self, activity: PcActivity) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                "INSERT INTO pc_activity(id, pc_id, timestamp, kind, summary, ref_type, ref_id) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (
+                    activity.id,
+                    activity.pc_id,
+                    activity.timestamp,
+                    activity.kind,
+                    activity.summary,
+                    activity.ref_type,
+                    activity.ref_id,
+                ),
+            )
+            await db.commit()
+
+    async def list_pc_activity(self, pc_id: str, *, since: str | None = None, limit: int = 200) -> list[PcActivity]:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            if since:
+                cur = await db.execute(
+                    "SELECT id, pc_id, timestamp, kind, summary, ref_type, ref_id "
+                    "FROM pc_activity WHERE pc_id=? AND timestamp>=? "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    (pc_id, since, limit),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT id, pc_id, timestamp, kind, summary, ref_type, ref_id "
+                    "FROM pc_activity WHERE pc_id=? "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    (pc_id, limit),
+                )
+            rows = await cur.fetchall()
+        out = [
+            PcActivity(
+                id=r["id"],
+                pc_id=r["pc_id"],
+                timestamp=r["timestamp"],
+                kind=r["kind"],
+                summary=r["summary"],
+                ref_type=r["ref_type"],
+                ref_id=r["ref_id"],
+            )
+            for r in rows
+        ]
+        out.reverse()
+        return out
 
     async def add_event(self, event: Event) -> None:
         async with aiosqlite.connect(self._path) as db:
