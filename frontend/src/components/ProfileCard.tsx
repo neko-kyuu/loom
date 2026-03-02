@@ -1,34 +1,8 @@
-import { Send } from "lucide-react";
 import { useMemo, useState, type CSSProperties } from "react";
 import type { Actor } from "../types";
-import type { Profile, ProfilesState } from "../lib/profiles";
-import { chatDisplayName, getProfile, statusDotColor } from "../lib/profiles";
-import { absoluteAssetUrl } from "../lib/api";
-
-function nameStyleCss(p: Profile | null): CSSProperties {
-  if (!p) return {};
-  const font =
-    p.nameStyle.font === "serif"
-      ? "ui-serif, Georgia, Cambria, \"Times New Roman\", Times, serif"
-      : p.nameStyle.font === "mono"
-        ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace"
-        : "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-
-  if (p.nameStyle.colorMode === "gradient") {
-    return {
-      fontFamily: font,
-      backgroundImage: `linear-gradient(90deg, ${p.nameStyle.gradientFrom}, ${p.nameStyle.gradientTo})`,
-      WebkitBackgroundClip: "text",
-      color: "transparent"
-    };
-  }
-  return { fontFamily: font, color: p.nameStyle.solid };
-}
-
-function avatarLabel(name?: string | null) {
-  const s = (name || "?").trim();
-  return s ? s.slice(0, 1).toUpperCase() : "?";
-}
+import type { ProfilesState } from "../lib/profiles";
+import { chatDisplayName, getProfile } from "../lib/profiles";
+import ProfileModal from "./ProfileModal";
 
 export default function ProfileCard(props: {
   open: boolean;
@@ -49,7 +23,6 @@ export default function ProfileCard(props: {
 
   if (!props.open || !props.actor) return null;
 
-  const dot = statusDotColor(profile);
   const cardStyle: CSSProperties = props.anchor
     ? {
         left: Math.max(12, Math.min(window.innerWidth - 320, props.anchor.x)),
@@ -65,103 +38,40 @@ export default function ProfileCard(props: {
         color: profile?.panelTextColor || "var(--text)"
       };
 
+  function sendDm() {
+    if (!isPc) return;
+    const t = dmText.trim();
+    if (!t) return;
+    props.onDmPc(pcId, t);
+    setDmText("");
+  }
+
   return (
     <div className="profileOverlay" role="presentation" onClick={props.onClose}>
-      <div
-        className="profileModal anchored"
-        role="dialog"
-        aria-label="个人资料"
+      <ProfileModal
+        className="anchored"
+        ariaLabel="个人资料"
+        profile={profile}
+        title={title}
+        subtitle={subtitle}
         style={cardStyle}
         onClick={(e) => {
           e.stopPropagation();
         }}
-      >
-        <div className="profileHeader" style={{ backgroundColor: profile?.panelBgColor || "var(--panel2)" }}>
-          {profile?.panelCoverUrl ? (
-            <div className="profileCover" style={{ backgroundImage: `url(${absoluteAssetUrl(profile.panelCoverUrl)})` }} />
-          ) : (
-            <div className="profileCover placeholder" />
-          )}
-          <div className="profileAvatarWrap">
-            <div className="profileAvatar">
-              <div className="avatarClip" aria-hidden="true">
-                {profile?.avatarUrl ? (
-                  <img
-                    src={absoluteAssetUrl(profile.avatarUrl)}
-                    alt={subtitle}
-                    onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).style.display = "none";
-                    }}
-                  />
-                ) : (
-                  <span>{avatarLabel(subtitle)}</span>
-                )}
-              </div>
-              {dot ? <span className="statusDot" style={{ background: dot }} /> : null}
-            </div>
-          </div>
-        </div>
-
-        <div className="profileBody" style={{ backgroundColor: profile?.panelBgColor || "var(--panel)" }}>
-          <div className="profileTopRow">
-            <div className="profileNames">
-              <div className="profileNick" style={nameStyleCss(profile)}>
-                {title}
-              </div>
-              <div className="profileName" style={{ color: profile?.panelTextColor || "var(--muted)"}}>{subtitle}</div>
-              {profile?.tags?.length ? (
-                <div className="profileTagsBlock">
-                  <div className="profileTags">
-                    {profile.tags.map((t) => (
-                      <span key={t} className="tagPill">
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          </div>
-
-          {isPc ? (
-            <div className="profileDm">
-              <div className="profileDmRow">
-                <input
-                  className="profileDmInput"
-                  value={dmText}
-                  placeholder={props.canDmPc ? `私信 ${subtitle}…` : "未连接"}
-                  disabled={!props.canDmPc}
-                  onChange={(e) => setDmText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      const t = dmText.trim();
-                      if (!t) return;
-                      props.onDmPc(pcId, t);
-                      setDmText("");
-                    }
-                  }}
-                />
-                <button
-                  className="primary"
-                  disabled={!props.canDmPc || !dmText.trim()}
-                  onClick={() => {
-                    const t = dmText.trim();
-                    if (!t) return;
-                    props.onDmPc(pcId, t);
-                    setDmText("");
-                  }}
-                  aria-label="发送"
-                  title="发送"
-                >
-                  <Send size={18} />
-                </button>
-              </div>
-              <div className="profileDmHint">提示：这会通过 DM 转发给 PC（等同于 direct）。</div>
-            </div>
-          ) : null}
-        </div>
-      </div>
+        dm={
+          isPc
+            ? {
+                kind: "interactive",
+                value: dmText,
+                onChange: setDmText,
+                placeholder: props.canDmPc ? `私信 ${subtitle}…` : "未连接",
+                canSend: props.canDmPc,
+                onSend: sendDm,
+                hint: "提示：这会通过 DM 转发给 PC（等同于 direct）。"
+              }
+            : { kind: "none" }
+        }
+      />
     </div>
   );
 }

@@ -23,6 +23,7 @@ export type Profile = {
   tags: string[]; // badge tags
   avatarUrl: string;
   panelCoverUrl: string;
+  panelCoverColor: string; // empty = placeholder
   panelBgColor: string; // #rrggbb
   panelTextColor: string; // #rrggbb
   nameStyle: NameStyle;
@@ -46,9 +47,15 @@ const DEFAULT_STYLE: NameStyle = {
 
 const DEFAULT_PANEL_BG = "#151823";
 const DEFAULT_PANEL_TEXT = "#e9ecf1";
+const DEFAULT_PANEL_COVER_COLOR = DEFAULT_PANEL_BG;
 
 function safeString(v: unknown, fallback: string) {
   return typeof v === "string" ? v : fallback;
+}
+
+function safeStringNonEmpty(v: unknown, fallback: string) {
+  if (typeof v !== "string") return fallback;
+  return v.trim() ? v : fallback;
 }
 
 function safeStringArray(v: unknown): string[] {
@@ -93,6 +100,7 @@ function parseProfile(raw: any): Profile | null {
     tags: safeStringArray(raw.tags),
     avatarUrl: safeString(raw.avatarUrl, ""),
     panelCoverUrl: safeString(raw.panelCoverUrl, ""),
+    panelCoverColor: safeStringNonEmpty(raw.panelCoverColor, DEFAULT_PANEL_COVER_COLOR),
     panelBgColor: safeString(raw.panelBgColor, DEFAULT_PANEL_BG),
     panelTextColor: safeString(raw.panelTextColor, DEFAULT_PANEL_TEXT),
     nameStyle,
@@ -158,6 +166,7 @@ export function defaultProfileForActor(actor: Actor): Profile {
     tags: [],
     avatarUrl: "",
     panelCoverUrl: "",
+    panelCoverColor: DEFAULT_PANEL_COVER_COLOR,
     panelBgColor: DEFAULT_PANEL_BG,
     panelTextColor: DEFAULT_PANEL_TEXT,
     nameStyle: style,

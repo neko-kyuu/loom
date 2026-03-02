@@ -17,7 +17,8 @@ html[data-theme="milktea"] .profileOverlay {
   width: min(300px, calc(100vw - 24px));
   max-height: calc(100vh - 24px);
   border-radius: 16px;
-  border: 1px solid var(--border);
+  border: 5px solid var(--profileBorderColor, var(--border));
+  box-sizing: border-box;
   overflow: hidden;
   box-shadow: 0 24px 72px rgba(0, 0, 0, 0.45);
   display: flex;
@@ -30,6 +31,16 @@ html[data-theme="milktea"] .profileOverlay {
 
 .profileModal.preview {
   width: 100%;
+  box-shadow: none;
+}
+
+.profileStatusDot {
+  width: 24px;
+  height: 24px;
+  right: -6px;
+  bottom: -6px;
+  border-width: 5px;
+  border-color: var(--profileBorderColor, var(--panel));
   box-shadow: none;
 }
 
@@ -57,7 +68,7 @@ html[data-theme="milktea"] .profileOverlay {
   width: 72px;
   height: 72px;
   border-radius: 999px;
-  border: 4px solid var(--panel);
+  border: 4px solid var(--profileBorderColor, var(--panel));
   display: grid;
   place-items: center;
   overflow: visible;

@@ -1,34 +1,11 @@
 import { useMemo, useState } from "react";
-import { Plus, X, Send } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import type { Actor } from "../../types";
 import type { MoodStatus, NameFont, NameStyle, Profile, ProfilesState } from "../../lib/profiles";
-import { chatDisplayName, defaultProfileForActor, getProfile, statusDotColor } from "../../lib/profiles";
-import { absoluteAssetUrl, uploadAssetDataUrl } from "../../lib/api";
+import { defaultProfileForActor, getProfile } from "../../lib/profiles";
+import { uploadAssetDataUrl } from "../../lib/api";
 import ImageCropModal from "../ImageCropModal";
-
-function avatarLabel(name?: string | null) {
-  const s = (name || "?").trim();
-  return s ? s.slice(0, 1).toUpperCase() : "?";
-}
-
-function nameCss(p: Profile): React.CSSProperties {
-  const font =
-    p.nameStyle.font === "serif"
-      ? "ui-serif, Georgia, Cambria, \"Times New Roman\", Times, serif"
-      : p.nameStyle.font === "mono"
-        ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace"
-        : "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-
-  if (p.nameStyle.colorMode === "gradient") {
-    return {
-      fontFamily: font,
-      backgroundImage: `linear-gradient(90deg, ${p.nameStyle.gradientFrom}, ${p.nameStyle.gradientTo})`,
-      WebkitBackgroundClip: "text",
-      color: "transparent"
-    };
-  }
-  return { fontFamily: font, color: p.nameStyle.solid };
-}
+import ProfileModal from "../ProfileModal";
 
 export default function ProfileTab(props: {
   open: boolean;
@@ -252,78 +229,95 @@ export default function ProfileTab(props: {
                 )}
               </div>
 
-              <div className="settingsSubTitle">面板外观</div>
-              <div className="formGrid">
-                <label className="formRow">
-                  <span className="formLabel">背景图</span>
-                  <div className="uploadRow">
-                    <input
-                      className="customInput"
-                      value={selectedProfile.panelCoverUrl}
-                      placeholder="URL 或上传（留空使用占位）"
-                      onChange={(e) => updateProfile((p) => ({ ...p, panelCoverUrl: e.target.value }))}
-                    />
-                    <div className="uploadActions">
-                      <input
-                        className="hiddenFileInput"
-                        type="file"
-                        accept="image/*"
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) setCropReq({ kind: "cover", file: f });
-                          e.currentTarget.value = "";
-                        }}
-                        title="上传背景图"
-                      />
-                      <button
-                        type="button"
-                        className="iconBtn iconOnly"
-                        aria-label="选择背景图文件"
-                        title="选择背景图文件"
-                        onClick={(e) => {
-                          const root = (e.currentTarget as HTMLButtonElement).parentElement;
-                          const input = root?.querySelector("input[type=file]") as HTMLInputElement | null;
-                          input?.click();
-                        }}
-                      >
-                        <Plus size={16} />
-                      </button>
-                    </div>
-                  </div>
-                </label>
-                <label className="formRow">
-                  <span className="formLabel">面板背景色</span>
-                  <div className="colorRow">
-                    <input
-                      className="customColor"
-                      type="color"
-                      value={selectedProfile.panelBgColor}
-                      onChange={(e) => updateProfile((p) => ({ ...p, panelBgColor: e.target.value }))}
-                    />
-                    <input
-                      className="customInput"
-                      value={selectedProfile.panelBgColor}
-                      onChange={(e) => updateProfile((p) => ({ ...p, panelBgColor: e.target.value }))}
-                    />
-                  </div>
-                </label>
-                <label className="formRow">
-                  <span className="formLabel">面板字体色</span>
-                  <div className="colorRow">
-                    <input
-                      className="customColor"
-                      type="color"
-                      value={selectedProfile.panelTextColor}
-                      onChange={(e) => updateProfile((p) => ({ ...p, panelTextColor: e.target.value }))}
-                    />
-                    <input
-                      className="customInput"
-                      value={selectedProfile.panelTextColor}
-                      onChange={(e) => updateProfile((p) => ({ ...p, panelTextColor: e.target.value }))}
-                    />
-                  </div>
-                </label>
-              </div>
+	              <div className="settingsSubTitle">面板外观</div>
+	              <div className="formGrid">
+	                <label className="formRow">
+	                  <span className="formLabel">背景图</span>
+	                  <div className="uploadRow">
+	                    <input
+	                      className="customInput"
+	                      value={selectedProfile.panelCoverUrl}
+	                      placeholder="URL 或上传（留空使用占位）"
+	                      onChange={(e) => updateProfile((p) => ({ ...p, panelCoverUrl: e.target.value }))}
+	                    />
+	                    <div className="uploadActions">
+	                      <input
+	                        className="hiddenFileInput"
+	                        type="file"
+	                        accept="image/*"
+	                        onChange={(e) => {
+	                          const f = e.target.files?.[0];
+	                          if (f) setCropReq({ kind: "cover", file: f });
+	                          e.currentTarget.value = "";
+	                        }}
+	                        title="上传背景图"
+	                      />
+	                      <button
+	                        type="button"
+	                        className="iconBtn iconOnly"
+	                        aria-label="选择背景图文件"
+	                        title="选择背景图文件"
+	                        onClick={(e) => {
+	                          const root = (e.currentTarget as HTMLButtonElement).parentElement;
+	                          const input = root?.querySelector("input[type=file]") as HTMLInputElement | null;
+	                          input?.click();
+	                        }}
+	                      >
+	                        <Plus size={16} />
+	                      </button>
+	                    </div>
+	                  </div>
+	                </label>
+	                <label className="formRow">
+	                  <span className="formLabel">背景纯色</span>
+	                  <div className="colorRow">
+	                    <input
+	                      className="customColor"
+	                      type="color"
+	                      value={selectedProfile.panelCoverColor}
+	                      onChange={(e) => updateProfile((p) => ({ ...p, panelCoverColor: e.target.value }))}
+	                    />
+	                    <input
+	                      className="customInput"
+	                      value={selectedProfile.panelCoverColor}
+	                      placeholder="#rrggbb"
+	                      onChange={(e) => updateProfile((p) => ({ ...p, panelCoverColor: e.target.value }))}
+	                    />
+	                  </div>
+	                </label>
+	                <label className="formRow">
+	                  <span className="formLabel">面板背景色</span>
+	                  <div className="colorRow">
+	                    <input
+	                      className="customColor"
+	                      type="color"
+	                      value={selectedProfile.panelBgColor}
+	                      onChange={(e) => updateProfile((p) => ({ ...p, panelBgColor: e.target.value }))}
+	                    />
+	                    <input
+	                      className="customInput"
+	                      value={selectedProfile.panelBgColor}
+	                      onChange={(e) => updateProfile((p) => ({ ...p, panelBgColor: e.target.value }))}
+	                    />
+	                  </div>
+	                </label>
+	                <label className="formRow">
+	                  <span className="formLabel">面板字体色</span>
+	                  <div className="colorRow">
+	                    <input
+	                      className="customColor"
+	                      type="color"
+	                      value={selectedProfile.panelTextColor}
+	                      onChange={(e) => updateProfile((p) => ({ ...p, panelTextColor: e.target.value }))}
+	                    />
+	                    <input
+	                      className="customInput"
+	                      value={selectedProfile.panelTextColor}
+	                      onChange={(e) => updateProfile((p) => ({ ...p, panelTextColor: e.target.value }))}
+	                    />
+	                  </div>
+	                </label>
+	              </div>
 
               <div className="settingsSubTitle">心情状态</div>
               <div className="formGrid">
@@ -369,69 +363,14 @@ export default function ProfileTab(props: {
 
             <div className="profileTabPreviewFixed">
               <div className="profilePreviewShell">
-                <div className="profileModal preview" style={{ color: selectedProfile.panelTextColor }}>
-                  <div className="profileHeader" style={{ backgroundColor: selectedProfile.panelBgColor }}>
-                    {selectedProfile.panelCoverUrl ? (
-                      <div
-                        className="profileCover"
-                        style={{ backgroundImage: `url(${absoluteAssetUrl(selectedProfile.panelCoverUrl)})` }}
-                      />
-                    ) : (
-                      <div className="profileCover placeholder" />
-                    )}
-                    <div className="profileAvatarWrap">
-                      <div className="profileAvatar">
-                        <div className="avatarClip" aria-hidden="true">
-                          {selectedProfile.avatarUrl ? (
-                            <img
-                              src={absoluteAssetUrl(selectedProfile.avatarUrl)}
-                              alt={chatDisplayName(props.profiles, selectedActor)}
-                              onError={(e) => ((e.currentTarget as HTMLImageElement).style.display = "none")}
-                            />
-                          ) : (
-                            <span>{avatarLabel(previewSub)}</span>
-                          )}
-                        </div>
-                        {statusDotColor(selectedProfile) ? (
-                          <span className="statusDot" style={{ background: statusDotColor(selectedProfile) as string }} />
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="profileBody" style={{ backgroundColor: selectedProfile.panelBgColor }}>
-                    <div className="profileTopRow">
-                      <div className="profileNames">
-                        <div className="profileNick" style={nameCss(selectedProfile)}>
-                          {previewTitle}
-                        </div>
-                        <div className="profileName">{previewSub}</div>
-                        {selectedProfile.tags.length ? (
-                          <div className="profileTagsBlock">
-                            <div className="profileTags">
-                              {selectedProfile.tags.map((t) => (
-                                <span key={t} className="tagPill">
-                                  {t}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                    {selectedActor.kind === "pc" ? (
-                      <div className="profileDm">
-                        <div className="profileDmRow">
-                          <input className="profileDmInput" value="" placeholder="私信 PC…" readOnly />
-                          <button
-                            className="primary" disabled
-                          >
-                            <Send size={18} />
-                          </button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
+                <ProfileModal
+                  className="preview"
+                  profile={selectedProfile}
+                  title={previewTitle}
+                  subtitle={previewSub}
+                  style={{ color: selectedProfile.panelTextColor }}
+                  dm={selectedActor.kind === "pc" ? { kind: "preview", placeholder: "私信 PC…" } : { kind: "none" }}
+                />
               </div>
             </div>
           </div>
