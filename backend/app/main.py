@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from fastapi.responses import Response
 from .db import SqliteStore
 from .demo_forum import build_demo_forum_seed
 from .engine import DemoEngine, ForumChannel
+from .llm import LlmService
 from .models import Actor, Message, WsClientToServer
 from .settings import get_settings
 from .ws import ConnectionManager
@@ -21,7 +23,8 @@ from .ws import ConnectionManager
 settings = get_settings()
 store = SqliteStore(settings.sqlite_path)
 ws_manager = ConnectionManager()
-engine = DemoEngine(settings=settings, store=store, ws=ws_manager)
+llm = LlmService(store=store)
+engine = DemoEngine(settings=settings, store=store, ws=ws_manager, llm=llm)
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
@@ -457,6 +460,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             {"type": "error", "payload": {"message": "target.pc_ids is required"}}
                         )
                         continue
+                    pc_target = None
+                    if len(pc_ids) == 1 and isinstance(pc_ids[0], str):
+                        pc_target = next((p for p in engine.pcs if p.id == pc_ids[0]), None)
+                    try:
+                        dm_content = await engine.dm_forward(content=content, pc=pc_target)
+                    except Exception:  # noqa: BLE001
+                        dm_content = content
+
+                    enqueue_tasks = []
                     for pc_id in pc_ids:
                         conv_id = f"dm_to_{pc_id}"
                         dm_msg = Message(
@@ -465,32 +477,47 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             thread_id=origin_thread_id or None,
                             from_actor=Actor(kind="dm", id="dm", name="DM"),
                             to=[Actor(kind="pc", id=pc_id)],
-                            content=content,
+                            content=dm_content,
                             send_batch_id=send_batch_id,
                         )
                         await store.add_message(dm_msg)
                         await ws_manager.broadcast({"type": "message", "payload": dm_msg.model_dump()})
-                        await engine.enqueue_pc_reaction(
-                            conversation_id=conv_id, pc_id=pc_id, prompt=content, thread_id=origin_thread_id or None
+                        enqueue_tasks.append(
+                            engine.enqueue_pc_reaction(
+                                conversation_id=conv_id,
+                                pc_id=pc_id,
+                                prompt=dm_content,
+                                thread_id=origin_thread_id or None,
+                            )
                         )
+                    if enqueue_tasks:
+                        await asyncio.gather(*enqueue_tasks)
                 else:
+                    try:
+                        dm_content = await engine.dm_forward(content=content, pc=None)
+                    except Exception:  # noqa: BLE001
+                        dm_content = content
                     dm_msg = Message(
                         conversation_id=origin_channel_id or "broadcast",
                         channel="broadcast",
                         thread_id=origin_thread_id or None,
                         from_actor=Actor(kind="dm", id="dm", name="DM"),
                         to=[],
-                        content=content,
+                        content=dm_content,
                     )
                     await store.add_message(dm_msg)
                     await ws_manager.broadcast({"type": "message", "payload": dm_msg.model_dump()})
-                    for pc in engine.pcs:
-                        await engine.enqueue_pc_reaction(
-                            conversation_id=origin_channel_id or "broadcast",
-                            pc_id=pc.id,
-                            prompt=content,
-                            thread_id=origin_thread_id or None,
+                    await asyncio.gather(
+                        *(
+                            engine.enqueue_pc_reaction(
+                                conversation_id=origin_channel_id or "broadcast",
+                                pc_id=pc.id,
+                                prompt=dm_content,
+                                thread_id=origin_thread_id or None,
+                            )
+                            for pc in engine.pcs
                         )
+                    )
 
     except WebSocketDisconnect:
         pass

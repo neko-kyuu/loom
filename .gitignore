@@ -35,3 +35,4 @@ dist/
 .pytest_cache/
 *.sqlite
 *.sqlite3
+config.json

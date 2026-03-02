@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,13 @@ class Settings(BaseSettings):
     openai_base_url: str | None = None
     openai_api_key: str | None = None
     openai_model: str | None = None
+
+    # Per-actor overrides (optional; can be provided via config.json)
+    openai_dm_model: str | None = None
+    openai_dm_persona: str = "你是DM（主持人/叙事者）。你负责把用户的话转述给PC们，并补充必要背景；回复简短明确。"
+
+    openai_pc_models: dict[str, str | None] = Field(default_factory=dict)
+    openai_pc_personas: dict[str, str | None] = Field(default_factory=dict)
 
 
 @lru_cache

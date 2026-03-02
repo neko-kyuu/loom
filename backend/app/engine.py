@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
 from .db import SqliteStore
+from .llm import LlmService, openai_chat_completions_url, parse_llm_response
 from .models import Actor, Conversation, Message
 from .settings import Settings
 from .ws import ConnectionManager
@@ -15,6 +17,16 @@ from .ws import ConnectionManager
 class PC:
     id: str
     name: str
+    model: str | None = None
+    persona: str | None = None
+
+
+@dataclass(frozen=True)
+class DM:
+    id: str = "dm"
+    name: str = "DM"
+    model: str | None = None
+    persona: str | None = None
 
 
 @dataclass(frozen=True)
@@ -33,16 +45,29 @@ class Job:
 
 
 class DemoEngine:
-    def __init__(self, *, settings: Settings, store: SqliteStore, ws: ConnectionManager) -> None:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        store: SqliteStore,
+        ws: ConnectionManager,
+        llm: LlmService | None = None,
+    ) -> None:
         self._settings = settings
         self._store = store
         self._ws = ws
+        self._llm = llm
 
         self._paused = False
         self._pause_event = asyncio.Event()
         self._pause_event.set()
         self._queue: asyncio.Queue[Job] = asyncio.Queue()
-        self._runner_task: asyncio.Task | None = None
+        self._worker_tasks: list[asyncio.Task[None]] = []
+
+        self.dm = DM(
+            model=settings.openai_dm_model or settings.openai_model,
+            persona=settings.openai_dm_persona,
+        )
 
         self.pcs: list[PC] = [
             PC(id="pc_1", name="Alice"),
@@ -50,6 +75,16 @@ class DemoEngine:
             PC(id="pc_3", name="Cathy"),
             PC(id="pc_4", name="Dylan"),
         ]
+        self._apply_llm_profiles()
+
+    def _apply_llm_profiles(self) -> None:
+        for pc in self.pcs:
+            model = self._settings.openai_pc_models.get(pc.id)
+            pc.model = model if isinstance(model, str) and model.strip() else self._settings.openai_model
+            persona = self._settings.openai_pc_personas.get(pc.id)
+            pc.persona = (
+                persona if isinstance(persona, str) and persona.strip() else f"你是{pc.name}。回复简短明确。"
+            )
 
     def apply_profiles_state(self, profiles_state: Any) -> None:
         """
@@ -86,6 +121,7 @@ class DemoEngine:
             new_name = display_name_by_id.get(pc.id)
             if new_name:
                 pc.name = new_name
+        self._apply_llm_profiles()
 
     def build_conversations(self, *, forum_channels: list[ForumChannel], broadcast_description: str | None = None) -> list[Conversation]:
         broadcast = Conversation(
@@ -123,8 +159,11 @@ class DemoEngine:
         return self.build_conversations(forum_channels=[], broadcast_description=None)
 
     async def start(self) -> None:
-        if self._runner_task is None:
-            self._runner_task = asyncio.create_task(self._runner(), name="demo-engine-runner")
+        if not self._worker_tasks:
+            n = max(1, len(self.pcs))
+            self._worker_tasks = [
+                asyncio.create_task(self._worker(i), name=f"demo-engine-worker-{i}") for i in range(n)
+            ]
 
     async def set_paused(self, paused: bool) -> None:
         self._paused = paused
@@ -151,7 +190,7 @@ class DemoEngine:
             }
         )
 
-    async def _runner(self) -> None:
+    async def _worker(self, _worker_id: int) -> None:
         while True:
             job = await self._queue.get()
             try:
@@ -166,9 +205,10 @@ class DemoEngine:
                         },
                     }
                 )
-                await asyncio.sleep(max(0, self._settings.demo_fake_latency_ms) / 1000)
+                if self._settings.demo_fake:
+                    await asyncio.sleep(max(0, self._settings.demo_fake_latency_ms) / 1000)
 
-                reply = self._fake_pc_reply(job.pc, job.prompt)
+                reply = await self._pc_reply(job)
                 message = Message(
                     conversation_id=job.conversation_id,
                     channel="direct" if job.conversation_id != "broadcast" else "broadcast",
@@ -195,6 +235,96 @@ class DemoEngine:
 
     def _fake_pc_reply(self, pc: PC, prompt: str) -> str:
         return f"{pc.name}：收到。({prompt})"
+
+    async def dm_forward(self, *, content: str, pc: PC | None) -> str:
+        """
+        Convert user's message into a DM message (optionally tailored to a specific PC).
+        """
+        if self._settings.demo_fake or self._llm is None:
+            return content
+        if not (self._settings.openai_base_url and self._settings.openai_api_key and self.dm.model):
+            return content
+
+        target_hint = f"面向 {pc.name}" if pc is not None else "面向所有PC"
+        system = (self.dm.persona or "").strip() or "你是DM。"
+        messages = [
+            {
+                "role": "system",
+                "content": f"{system}\n{target_hint}。把用户的话转述/整理成你要对PC说的话；简短明确，不要复述提示词。",
+            },
+            {"role": "user", "content": content},
+        ]
+
+        url = openai_chat_completions_url(self._settings.openai_base_url)
+        res = await self._llm.chat(
+            url=url,
+            apikey=self._settings.openai_api_key,
+            model=self.dm.model,
+            messages=messages,
+            tools=None,
+        )
+        parsed = res.get("parsed") if isinstance(res, dict) else None
+        if isinstance(parsed, dict) and parsed.get("kind") == "markdown":
+            out = parsed.get("markdown")
+            if isinstance(out, str) and out.strip():
+                return out.strip()
+
+        raw = res.get("raw") if isinstance(res, dict) else None
+        p2 = parse_llm_response(raw)
+        if p2["kind"] == "markdown" and isinstance(p2["markdown"], str):
+            return p2["markdown"].strip()
+        try:
+            return json.dumps(p2["structured"], ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            return content
+
+    async def _pc_reply(self, job: Job) -> str:
+        if self._settings.demo_fake or self._llm is None:
+            return self._fake_pc_reply(job.pc, job.prompt)
+        if not (self._settings.openai_base_url and self._settings.openai_api_key and job.pc.model):
+            return self._fake_pc_reply(job.pc, job.prompt)
+
+        history = await self._store.list_messages(job.conversation_id, limit=30)
+        messages: list[dict[str, Any]] = []
+        system = (job.pc.persona or "").strip() or "你是一个PC角色。"
+        messages.append({"role": "system", "content": f"{system}\n你只需用一段简短中文回复。"})
+
+        for m in history[-20:]:
+            if m.from_actor.kind == "pc" and m.from_actor.id == job.pc.id:
+                role = "assistant"
+                content = m.content
+            else:
+                role = "user"
+                name = m.from_actor.name or m.from_actor.id or m.from_actor.kind
+                content = m.content if m.from_actor.kind in {"dm", "user"} else f"{name}：{m.content}"
+            if isinstance(content, str) and content.strip():
+                messages.append({"role": role, "content": content.strip()})
+
+        if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != job.prompt:
+            messages.append({"role": "user", "content": job.prompt})
+
+        url = openai_chat_completions_url(self._settings.openai_base_url)
+        res = await self._llm.chat(
+            url=url,
+            apikey=self._settings.openai_api_key,
+            model=job.pc.model,
+            messages=messages,
+            tools=None,
+        )
+        parsed = res.get("parsed") if isinstance(res, dict) else None
+        if isinstance(parsed, dict) and parsed.get("kind") == "markdown":
+            out = parsed.get("markdown")
+            if isinstance(out, str) and out.strip():
+                return out.strip()
+
+        raw = res.get("raw") if isinstance(res, dict) else None
+        p2 = parse_llm_response(raw)
+        if p2["kind"] == "markdown" and isinstance(p2["markdown"], str):
+            return p2["markdown"].strip()
+        try:
+            return json.dumps(p2["structured"], ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            return self._fake_pc_reply(job.pc, job.prompt)
 
     @staticmethod
     def new_send_batch_id() -> str:
