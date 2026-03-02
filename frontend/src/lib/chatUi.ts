@@ -35,7 +35,10 @@ export function nameStyleCss(profile: Profile | null): CSSProperties {
       fontFamily: font,
       backgroundImage: `linear-gradient(90deg, ${profile.nameStyle.gradientFrom}, ${profile.nameStyle.gradientTo})`,
       WebkitBackgroundClip: "text",
-      color: "transparent"
+      color: "transparent",
+      textShadow:`0 0 1px rgba(0, 0, 0, 0.15),
+                  0 0 2px rgba(255, 255, 255, 0.25),
+                  0 1px 2px rgba(147,147,147,.20)`
     };
   }
   return { fontFamily: font, color: profile.nameStyle.solid };

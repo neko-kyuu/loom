@@ -219,7 +219,6 @@ export default function AppearanceTab(props: {
                   <RotateCcw size={16} />
                 </button>
               </div>
-              <div className="customHint">提示：颜色输入支持 `#rgb` / `#rrggbb`。</div>
             </div>
           </div>
         ) : null}

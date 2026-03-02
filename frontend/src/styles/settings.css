@@ -148,6 +148,7 @@ html[data-theme="milktea"] .modalOverlay {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
 }
 
 .profileTabCanvas {
@@ -271,7 +272,7 @@ html[data-theme="milktea"] .modalOverlay {
 
 .settingsSubTitle {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 16px;
   margin: 10px 0 8px;
   font-weight: 800;
 }
@@ -452,11 +453,6 @@ html[data-theme="milktea"] .modalOverlay {
 .customActions {
   display: flex;
   justify-content: flex-end;
-}
-
-.customHint {
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .channelsHeader {

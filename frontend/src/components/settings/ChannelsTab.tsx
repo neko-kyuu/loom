@@ -47,7 +47,7 @@ export default function ChannelsTab(props: {
             aria-label="新增论坛频道"
             title="新增论坛频道"
           >
-            <Plus size={16} /> 新增
+            <Plus size={16} />
           </button>
         </div>
 
