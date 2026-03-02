@@ -486,7 +486,13 @@ export default function App() {
       return;
     }
 
-    wsRef.current.send({ type: "forum_post", channel_id: activeConv.id, thread_id: activeForumThread.id, content: text });
+    wsRef.current.send({
+      type: "user_inject",
+      content: text,
+      target: { kind: "broadcast" },
+      channel_id: activeConv.id,
+      thread_id: activeForumThread.id
+    });
     setThreadComposerContent("");
   }
 
