@@ -184,17 +184,26 @@ def _try_parse_json(text: str) -> Any | None:
         return None
 
 
+def _normalize_markdown(text: str) -> str:
+    s = text
+    for _ in range(6):
+        if "\\\\n" not in s:
+            break
+        s = s.replace("\\\\n", "\\n")
+    return s
+
+
 def parse_llm_response(raw: Any) -> LlmParsedOutput:
     """
     - Structured: tool_calls present OR assistant content is valid JSON.
     - Markdown: everything else (frontend can render it as Markdown).
     """
     if not isinstance(raw, dict):
-        return {"kind": "markdown", "structured": None, "markdown": str(raw)}
+        return {"kind": "markdown", "structured": None, "markdown": _normalize_markdown(str(raw))}
 
     non_json = raw.get("_non_json")
     if isinstance(non_json, str):
-        return {"kind": "markdown", "structured": None, "markdown": non_json}
+        return {"kind": "markdown", "structured": None, "markdown": _normalize_markdown(non_json)}
 
     choices = raw.get("choices")
     if isinstance(choices, list) and choices:
@@ -210,7 +219,7 @@ def parse_llm_response(raw: Any) -> LlmParsedOutput:
                     parsed = _try_parse_json(content)
                     if parsed is not None:
                         return {"kind": "structured", "structured": parsed, "markdown": None}
-                    return {"kind": "markdown", "structured": None, "markdown": content}
+                    return {"kind": "markdown", "structured": None, "markdown": _normalize_markdown(content)}
 
     # fallback: if the response itself is JSON-ish, keep it structured
     return {"kind": "structured", "structured": raw, "markdown": None}
