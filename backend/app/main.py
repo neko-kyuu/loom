@@ -27,7 +27,7 @@ store = SqliteStore(settings.sqlite_path)
 ws_manager = ConnectionManager()
 llm = LlmService(store=store)
 engine = DemoEngine(settings=settings, store=store, ws=ws_manager, llm=llm)
-tick_runner = TickRunner(store=store, ws=ws_manager, engine=engine, tick_s=60.0)
+tick_runner = TickRunner(store=store, ws=ws_manager, engine=engine, settings=settings, llm=llm, tick_s=60.0)
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
@@ -113,11 +113,10 @@ async def _startup() -> None:
             now=now,
         )
         await store.upsert_forum_threads(threads)
-        for m in posts:
-            await store.add_message_ignore(m)
+    for m in posts:
+        await store.add_message_ignore(m)
     await engine.start()
-    if settings.demo_fake:
-        await tick_runner.start()
+    await tick_runner.start()
 
 
 @app.get("/health")
