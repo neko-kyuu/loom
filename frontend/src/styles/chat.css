@@ -112,6 +112,16 @@
   background: color-mix(in srgb, var(--accent) 14%, rgba(255, 255, 255, 0.04));
 }
 
+.directMeta {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
 .name {
   font-weight: 700;
   font-size: 13px;

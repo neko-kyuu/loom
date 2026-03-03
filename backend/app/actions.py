@@ -26,14 +26,16 @@ class ReplyAction(_ActionBase):
 
 class DmAction(_ActionBase):
     """
-    Placeholder for future private messaging designs.
+    Direct message action.
 
-    NOTE: Validated for shape only; execution is intentionally a no-op for now.
+    Semantics:
+    - If `to_pc_id` is provided: send to that PC (PC↔PC), and backend may replicate copies for inbox views.
+    - If omitted: treat as DM (PC↔DM) message.
     """
 
     type: Literal["dm"]
     to_pc_id: str | None = None
-    content: str | None = None
+    content: str
 
 
 class NoopAction(_ActionBase):
@@ -139,8 +141,14 @@ def validate_action(raw: Any, *, ctx: ActionValidationContext) -> tuple[Action, 
         content = _clean_str(raw.get("content"))
         if to_pc_id and to_pc_id not in ctx.pc_ids:
             errors.append("dm.to_pc_id must be an existing pc id (or omit it)")
-        # Accept shape but mark as TODO; execution will be a placeholder no-op.
-        return DmAction(type="dm", to_pc_id=to_pc_id, content=content), errors
+        if not content:
+            errors.append("dm.content is required")
+        elif len(content) > 800:
+            content = content[:800]
+            notes.append("dm.content truncated to 800 chars")
+        if errors:
+            return NoopAction(type="noop", reason="invalid dm"), errors
+        return DmAction(type="dm", to_pc_id=to_pc_id, content=content), notes
 
     if a_type == "noop":
         reason = _clean_str(raw.get("reason"))

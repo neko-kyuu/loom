@@ -887,6 +887,7 @@ export default function App() {
                   typingNames={typingNames}
                   endRef={threadEndRef}
                   onOpenProfile={(actor, e) => openProfile(actor, e)}
+                  directViewerPcId={null}
                   dmTargetsByBatchId={dmTargetsByBatchId}
                   onJumpToDm={jumpToDm}
                   scrollToSendBatchId={
@@ -944,6 +945,7 @@ export default function App() {
             typingNames={typingNames}
             endRef={messagesEndRef}
             onOpenProfile={(actor, e) => openProfile(actor, e)}
+            directViewerPcId={activeConv?.kind === "dm_to_pc" ? activeConv.id.replace(/^dm_to_/, "") : null}
             dmTargetsByBatchId={dmTargetsByBatchId}
             onJumpToDm={jumpToDm}
             scrollToSendBatchId={

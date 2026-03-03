@@ -12,6 +12,7 @@ export default function ChatFlow(props: {
   typingNames: string;
   endRef: RefObject<HTMLDivElement>;
   onOpenProfile: (actor: Actor, ev: { clientY: number; currentTarget: Element | null }) => void;
+  directViewerPcId?: string | null;
   dmTargetsByBatchId?: Record<string, string[]>;
   onJumpToDm?: (pcId: string, sendBatchId: string) => void;
   scrollToSendBatchId?: string | null;
@@ -41,6 +42,7 @@ export default function ChatFlow(props: {
   const composerClassName = composer?.className || "composer";
   const [dmPickerOpenFor, setDmPickerOpenFor] = useState<string | null>(null);
   const messagesWrapRef = useRef<HTMLDivElement | null>(null);
+  const directViewerPcId = (props.directViewerPcId || "").trim() || null;
   const pillLabel = composer
     ? composer.pill.isDirect
       ? `direct${composer.pill.directSelectedCount ? `(${composer.pill.directSelectedCount})` : ""}`
@@ -84,6 +86,24 @@ export default function ChatFlow(props: {
           const name = chatDisplayName(props.profiles, m.from_actor);
           const prof = getProfile(props.profiles, m.from_actor);
           const isDirectUserRecord = m.channel === "direct" && m.from_actor.kind === "user";
+          const directMeta = (() => {
+            if (!directViewerPcId) return null;
+            if (m.channel !== "direct") return null;
+            const isOutbound = m.from_actor.kind === "pc" && m.from_actor.id === directViewerPcId;
+            if (isOutbound) {
+              const toActor =
+                (m.to || []).find((a) => a.kind === "pc" && Boolean(a.id) && a.id !== directViewerPcId) ||
+                (m.to || []).find((a) => a.kind === "dm") ||
+                null;
+              if (!toActor) return "to: ?";
+              const toName =
+                chatDisplayName(props.profiles, toActor) || toActor.name || toActor.id || (toActor.kind === "dm" ? "DM" : toActor.kind);
+              return `to: ${toName}`;
+            }
+            const fromName =
+              chatDisplayName(props.profiles, m.from_actor) || m.from_actor.name || m.from_actor.id || (m.from_actor.kind === "dm" ? "DM" : m.from_actor.kind);
+            return `from: ${fromName}`;
+          })();
           const targetPcIds =
             isDirectUserRecord && m.send_batch_id ? props.dmTargetsByBatchId?.[m.send_batch_id] || [] : [];
           const canJumpSingle = Boolean(props.onJumpToDm && targetPcIds.length === 1 && m.send_batch_id);
@@ -124,6 +144,7 @@ export default function ChatFlow(props: {
                   <div className="name" style={nameStyleCss(prof)}>
                     {name}
                   </div>
+                  {directMeta ? <span className="directMeta">{directMeta}</span> : null}
                   {isDirectUserRecord ? (
                     <span className="dmMarkWrap" data-dm-picker-root={dmPickerOpenFor === m.id ? "1" : undefined}>
                       {canJumpSingle ? (

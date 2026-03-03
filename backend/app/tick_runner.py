@@ -269,6 +269,11 @@ class TickRunner:
                     "required_fields": ["type", "channel_id", "thread_id", "content"],
                 },
                 {
+                    "type": "dm",
+                    "required_fields": ["type", "content"],
+                    "optional_fields": ["to_pc_id"],
+                },
+                {
                     "type": "noop",
                     "required_fields": ["type"],
                     "optional_fields": ["reason"],
@@ -277,8 +282,9 @@ class TickRunner:
             "constraints": [
                 "channel_id must be one of forum_channels[].id",
                 "thread_id must be one of threads_digest[].thread_id and must belong to the chosen channel_id",
-                "content should be concise (<=1200 chars). title <=80 chars.",
-                "Do NOT use type='dm' (private messaging is not implemented yet). If you want to DM, use noop with reason='dm_todo'.",
+                "content should be concise (thread content <=1200 chars; dm content <=800 chars). title <=80 chars.",
+                "For dm: omit to_pc_id to message DM; set to_pc_id to message another PC.",
+                "For dm: if to_pc_id is set, it must be one of pcs[].id and must not equal pc_id.",
             ],
         }
 
@@ -286,6 +292,7 @@ class TickRunner:
             "pc_id": pc_id,
             "pc_name": pc_name,
             "since": since,
+            "pcs": [{"id": p.id, "name": p.name} for p in self._engine.pcs],
             "forum_channels": forum_channels,
             "threads_digest": threads_digest,
             "inbox_digest": inbox_lines,
@@ -374,11 +381,19 @@ class TickRunner:
                     "content": f"【自动行动】回复一下（{now[:19]}）",
                 }
             if m == 3:
-                return {"type": "dm"}
+                now = utc_now_iso()
+                idx = next((i for i, p in enumerate(self._engine.pcs) if p.id == pc_id), 0)
+                target = self._engine.pcs[(idx + 1) % len(self._engine.pcs)]
+                return {
+                    "type": "dm",
+                    "to_pc_id": target.id,
+                    "content": f"【自动私信】{now[:19]} 你方便同步一下进展吗？",
+                }
             return {"type": "noop", "reason": "idle"}
 
         if turn_no % 2 == 0:
-            return {"type": "dm"}
+            now = utc_now_iso()
+            return {"type": "dm", "content": f"【自动私信】{now[:19]} 我准备推进一个小目标。"}
         return {"type": "noop", "reason": "no_forum_channel"}
 
     async def _apply_action(self, *, pc_id: str, action: CreateThreadAction | ReplyAction | DmAction | NoopAction) -> list[dict[str, Any]]:
@@ -405,7 +420,7 @@ class TickRunner:
             )
 
         if isinstance(action, DmAction):
-            return await self._apply_dm_placeholder(
+            return await self._apply_dm(
                 pc_id=pc.id,
                 pc_name=pc.name,
                 to_pc_id=action.to_pc_id,
@@ -492,22 +507,94 @@ class TickRunner:
         await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
         return [{"kind": "message", "message_id": msg.id}, {"kind": "thread", "thread_id": thread.id}]
 
-    async def _apply_dm_placeholder(
-        self, *, pc_id: str, pc_name: str, to_pc_id: str | None, content: str | None
-    ) -> list[dict[str, Any]]:
+    async def _apply_dm(self, *, pc_id: str, pc_name: str, to_pc_id: str | None, content: str) -> list[dict[str, Any]]:
         """
-        Placeholder for future DM/PM designs.
-        Record the intent in pc_activity and tick refs, but do not send messages yet.
+        Direct message semantics:
+        - DM↔PC uses the per-PC inbox conversation `dm_to_<pc_id>` (one conversation per PC).
+        - PC↔PC is copied into both participants' inbox conversations to avoid conversation explosion:
+            - @Alice (dm_to_pc_1) shows both incoming/outgoing involving Alice
+            - @Bob   (dm_to_pc_2) shows both incoming/outgoing involving Bob
         """
-        target = f"to {to_pc_id}" if to_pc_id else "to (unspecified)"
-        summary = f"{pc_name}：私信动作（未实现，{target}）"
-        if isinstance(content, str) and content.strip():
-            summary = f"{summary}：{content.strip()[:120]}"
+        now = utc_now_iso()
+        from_actor = Actor(kind="pc", id=pc_id, name=pc_name)
+
+        if to_pc_id and to_pc_id == pc_id:
+            await self._store.add_pc_activity(
+                PcActivity(pc_id=pc_id, kind="dm_skipped", summary=f"{pc_name}：私信自己（跳过）")
+            )
+            return [{"kind": "dm_skipped"}]
+
+        # PC -> DM (default target)
+        if not to_pc_id:
+            conv_id = f"dm_to_{pc_id}"
+            msg = Message(
+                conversation_id=conv_id,
+                channel="direct",
+                from_actor=from_actor,
+                to=[Actor(kind="dm", id="dm", name="DM")],
+                content=content,
+            )
+            await self._store.append_message(msg)
+            await self._store.add_pc_activity(
+                PcActivity(
+                    pc_id=pc_id,
+                    kind="dm_sent",
+                    summary=f"{pc_name}：私信 DM（{now[:19]}）",
+                    ref_type="message",
+                    ref_id=msg.id,
+                )
+            )
+            await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
+            return [{"kind": "message", "message_id": msg.id}]
+
+        # PC -> PC (replicated)
+        target = next((p for p in self._engine.pcs if p.id == to_pc_id), None)
+        if target is None:
+            await self._store.add_pc_activity(
+                PcActivity(pc_id=pc_id, kind="dm_failed", summary=f"{pc_name}：私信失败（unknown pc_id: {to_pc_id}）")
+            )
+            return [{"kind": "dm_failed"}]
+
+        sbid = str(uuid4())
+        to_actor = Actor(kind="pc", id=target.id, name=target.name)
+
+        sender_conv_id = f"dm_to_{pc_id}"
+        receiver_conv_id = f"dm_to_{target.id}"
+
+        msg_sender = Message(
+            conversation_id=sender_conv_id,
+            channel="direct",
+            from_actor=from_actor,
+            to=[to_actor],
+            content=content,
+            send_batch_id=sbid,
+        )
+        msg_receiver = Message(
+            conversation_id=receiver_conv_id,
+            channel="direct",
+            from_actor=from_actor,
+            to=[to_actor],
+            content=content,
+            send_batch_id=sbid,
+        )
+
+        await self._store.append_message(msg_sender)
+        await self._store.append_message(msg_receiver)
+
         await self._store.add_pc_activity(
             PcActivity(
                 pc_id=pc_id,
-                kind="dm_todo",
-                summary=summary,
+                kind="dm_sent",
+                summary=f"{pc_name}：私信 {target.name}（{now[:19]}）",
+                ref_type="message",
+                ref_id=msg_sender.id,
             )
         )
-        return [{"kind": "dm_todo"}]
+
+        await self._ws.broadcast({"type": "message", "payload": msg_sender.model_dump()})
+        await self._ws.broadcast({"type": "message", "payload": msg_receiver.model_dump()})
+        return [
+            {"kind": "message", "message_id": msg_sender.id},
+            {"kind": "message", "message_id": msg_receiver.id},
+            {"kind": "send_batch_id", "send_batch_id": sbid},
+        ]
