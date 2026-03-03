@@ -253,6 +253,14 @@ class TickRunner:
                 )
         threads_all.sort(key=lambda x: str(x.get("last_activity_at") or ""), reverse=True)
         threads_digest = threads_all[:12]
+        # TODO: Use the function tool to allow the PC to browse history on demand.
+        for td in threads_digest:
+            thread_id = str(td.get("thread_id") or "").strip()
+            if not thread_id:
+                td["thread_posts"] = []
+                continue
+            thread_msgs = await self._store.list_messages_by_thread(thread_id, limit=80)
+            td["thread_posts"] = [self._summarize_message(m, max_len=1200) for m in thread_msgs[-8:]]
 
         forum_channels = [{"id": c.id, "title": c.title, "description": c.description} for c in forum_convs]
 
