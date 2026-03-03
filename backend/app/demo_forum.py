@@ -23,8 +23,6 @@ def build_demo_forum_seed(
         return pc_actors[i] if i < len(pc_actors) else None
 
     t1 = f"{channel_id}:t1"
-    t2 = f"{channel_id}:t2"
-    t3 = f"{channel_id}:t3"
 
     posts: list[Message] = []
 
@@ -47,87 +45,8 @@ def build_demo_forum_seed(
         post_id=f"{t1}:p1",
         dt=now - timedelta(hours=36),
         from_actor=dm,
-        content=f"这里是 {channel_title}（论坛频道）。每个 thread 是一个可追溯的剧情片段；当前先用假数据展示 UI。",
+        content=f"这里是 {channel_title}（论坛频道）。每个 thread 是一个可追溯的剧情片段。",
     )
-    if pc(0):
-        add_post(
-            thread_id=t1,
-            post_id=f"{t1}:p2",
-            dt=now - timedelta(hours=20),
-            from_actor=pc(0) or dm,
-            content="收到，我会把每次行动的总结放在对应 thread 里。",
-        )
-    if pc(1):
-        add_post(
-            thread_id=t1,
-            post_id=f"{t1}:p3",
-            dt=now - timedelta(hours=9),
-            from_actor=pc(1) or dm,
-            content="这样回溯会方便很多，尤其是线索和结果整理。",
-        )
-    if pc(2):
-        add_post(
-            thread_id=t1,
-            post_id=f"{t1}:p4",
-            dt=now - timedelta(minutes=8),
-            from_actor=pc(2) or dm,
-            content="建议 thread 列表默认按最近活跃排序。",
-        )
-
-    add_post(
-        thread_id=t2,
-        post_id=f"{t2}:p1",
-        dt=now - timedelta(hours=18),
-        from_actor=dm,
-        content="你们在酒馆里听到有人低声提起“北门的封印”。谁去搭话？",
-    )
-    if pc(0):
-        add_post(
-            thread_id=t2,
-            post_id=f"{t2}:p2",
-            dt=now - timedelta(hours=12),
-            from_actor=pc(0) or dm,
-            content="我会先观察对方的反应，再以买酒为由接近。",
-        )
-    if pc(1):
-        add_post(
-            thread_id=t2,
-            post_id=f"{t2}:p3",
-            dt=now - timedelta(hours=8),
-            from_actor=pc(1) or dm,
-            content="我在旁边装作没兴趣，听关键词并记住细节。",
-        )
-    if pc(2):
-        add_post(
-            thread_id=t2,
-            post_id=f"{t2}:p4",
-            dt=now - timedelta(hours=3),
-            from_actor=pc(2) or dm,
-            content="我会试着问一句：封印什么时候开始松动的？",
-        )
-    add_post(
-        thread_id=t2,
-        post_id=f"{t2}:p5",
-        dt=now - timedelta(minutes=42),
-        from_actor=dm,
-        content="陌生人看了你一眼，低声说：‘昨夜。’ 他把一枚刻着纹路的铜币推了过来。",
-    )
-
-    add_post(
-        thread_id=t3,
-        post_id=f"{t3}:p1",
-        dt=now - timedelta(hours=8),
-        from_actor=dm,
-        content="这里会放一些公开可见的世界观/角色档案，便于新人快速补课。",
-    )
-    if pc(0):
-        add_post(
-            thread_id=t3,
-            post_id=f"{t3}:p2",
-            dt=now - timedelta(hours=2),
-            from_actor=pc(0) or dm,
-            content=f"{pc(0).name}：来自南方港口城市，擅长交涉。",
-        )
 
     def thread_from_posts(thread_id: str, title: str) -> ForumThread:
         thread_posts = [p for p in posts if p.thread_id == thread_id]
@@ -145,9 +64,7 @@ def build_demo_forum_seed(
         )
 
     threads = [
-        thread_from_posts(t1, "【公告】先用 thread 来组织剧情片段"),
-        thread_from_posts(t2, "酒馆里出现了一个陌生人…（线索收集）"),
-        thread_from_posts(t3, "世界观碎片：各 PC 的公开档案"),
+        thread_from_posts(t1, "【公告】发帖指南 - 请勿回复")
     ]
     threads.sort(key=lambda t: t.last_activity_at, reverse=True)
 

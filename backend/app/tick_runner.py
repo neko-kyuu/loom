@@ -258,33 +258,30 @@ class TickRunner:
 
         system = (persona or "").strip() or f"你是{pc_name}。"
         rules = {
-            "output": "Only output ONE JSON object. No markdown, no code fence, no extra text.",
-            "actions": [
-                {
-                    "type": "create_thread",
-                    "required_fields": ["type", "channel_id", "title", "content"],
-                },
-                {
-                    "type": "reply",
-                    "required_fields": ["type", "channel_id", "thread_id", "content"],
-                },
-                {
-                    "type": "dm",
-                    "required_fields": ["type", "content"],
-                    "optional_fields": ["to_pc_id"],
-                },
-                {
-                    "type": "noop",
-                    "required_fields": ["type"],
-                    "optional_fields": ["reason"],
-                },
+            "output": "你必须只输出 1 个 JSON object（不是数组）。禁止输出 Markdown/代码块/解释文字。",
+            "setting": "你正在一个虚拟的论坛里“上网”。你可以在论坛里发帖（thread）、回复、私信其他人，或者选择暂不行动（noop）。",
+            "bias": [
+                "你可以采取的行动如下，无优先级区分：",
+                "- create_thread ：没找到想聊的帖子？新建主题贴，展示你的表达欲",
+                "- reply ：回复现有的帖子",
+                "- dm ：有悄悄话想说？私信 DM管理员 或与其他 PC 进行私密的社交吧",
+                "只有在确实没有可做的事、或缺少必要信息时才选择 noop，并在 reason 里说明你缺少什么。",
             ],
-            "constraints": [
-                "channel_id must be one of forum_channels[].id",
-                "thread_id must be one of threads_digest[].thread_id and must belong to the chosen channel_id",
-                "content should be concise (thread content <=1200 chars; dm content <=800 chars). title <=80 chars.",
-                "For dm: omit to_pc_id to message DM; set to_pc_id to message another PC.",
-                "For dm: if to_pc_id is set, it must be one of pcs[].id and must not equal pc_id.",
+            "actions": [
+                {"type": "create_thread", "required_fields": ["type", "channel_id", "title", "content"]},
+                {"type": "reply", "required_fields": ["type", "channel_id", "thread_id", "content"]},
+                {"type": "dm", "required_fields": ["type", "content"], "optional_fields": ["to_pc_id"]},
+                {"type": "noop", "required_fields": ["type"], "optional_fields": ["reason"]},
+            ],
+            "hard_constraints": [
+                "channel_id 必须来自 forum_channels[].id",
+                "thread_id 必须来自 threads_digest[].thread_id，且必须属于所选 channel_id",
+                "create_thread.title <= 80 chars；create_thread/reply.content <= 1200 chars；dm.content <= 800 chars",
+                "dm: 省略 to_pc_id 表示发给 DM；填写 to_pc_id 表示发给某个 PC（必须是 pcs[].id 且不能等于 pc_id）",
+            ],
+            "writing_style": [
+                "用符合你的人设的语气发言，论坛很自由，没有硬性的格式规定。",
+                "避免空泛表态（如“收到/好的/我会努力”）。",
             ],
         }
 

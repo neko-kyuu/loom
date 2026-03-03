@@ -61,8 +61,15 @@ async def _startup() -> None:
         channels_state = {
             "broadcast": {"description": "闲聊/广播频道（固定存在，不可删除）"},
             "forums": [
-                {"id": "forum_trade", "title": "#trade", "description": "交易相关讨论"},
-                {"id": "forum_quest", "title": "#quest", "description": "任务/线索整理"},
+                {
+                    "id": "forum_rose_garden_salon", 
+                    "title": "# 🍽️ 玫瑰茶会花园", 
+                    "description": "贵族们的下午茶圣地，只为最尊贵的味蕾！在此尽情描写龙舌酱的鲜美、凤凰蛋挞的酥脆、百年酒窖的陈香……精灵贵族请优雅落座，人类贵族请别把茶洒在蕾丝上。"},
+                {
+                    "id": "forum_guilds_complex", 
+                    "title": "# 🏛️ 城市公会建筑群", 
+                    "description": "米克斯塔的平民行政中心！调查员公会、制图师公会、炼金行会、商会及其各个子支……这个城市拥有相当先进的公会体制和制度。"
+                },
             ]
         }
         await store.set_setting_json("channels_state", json.dumps(channels_state))
