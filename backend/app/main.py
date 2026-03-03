@@ -112,6 +112,7 @@ async def _startup() -> None:
 
     # demo seed: threads + posts for forum channels
     now = datetime.now(timezone.utc)
+    all_forum_posts: list[Message] = []
     for ch in forum_channels:
         threads, posts = build_demo_forum_seed(
             channel_id=ch.id,
@@ -120,7 +121,8 @@ async def _startup() -> None:
             now=now,
         )
         await store.upsert_forum_threads(threads)
-    for m in posts:
+        all_forum_posts.extend(posts)
+    for m in all_forum_posts:
         await store.add_message_ignore(m)
     await engine.start()
     await tick_runner.start()
