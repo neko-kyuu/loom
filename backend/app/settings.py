@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     openai_dm_model: str | None = None
     openai_dm_persona: str = "你是DM（主持人/叙事者）。你负责把用户的话转述给PC们，并补充必要背景；回复简短明确。"
 
+    # Per-PC overrides (optional; defaults live in backend/pc_config/)
     openai_pc_models: dict[str, str | None] = Field(default_factory=dict)
     openai_pc_personas: dict[str, str | None] = Field(default_factory=dict)
 

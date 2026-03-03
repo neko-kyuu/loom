@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from pc_config.prompts import render_prompt_messages
+
 from .actions import (
     ActionValidationContext,
     CreateThreadAction,
@@ -253,7 +255,7 @@ class TickRunner:
                 )
         threads_all.sort(key=lambda x: str(x.get("last_activity_at") or ""), reverse=True)
         threads_digest = threads_all[:12]
-        # TODO: Use the function tool to allow the PC to browse history on demand.
+        # TODO: Use the function tool to allow the PC to browse history(thread_posts) on demand.
         for td in threads_digest:
             thread_id = str(td.get("thread_id") or "").strip()
             if not thread_id:
@@ -264,50 +266,23 @@ class TickRunner:
 
         forum_channels = [{"id": c.id, "title": c.title, "description": c.description} for c in forum_convs]
 
-        system = (persona or "").strip() or f"你是{pc_name}。"
-        rules = {
-            "output": "你必须只输出 1 个 JSON object（不是数组）。禁止输出 Markdown/代码块/解释文字。",
-            "setting": "你正在一个虚拟的论坛里“上网”。你可以在论坛里发帖（thread）、回复、私信其他人，或者选择暂不行动（noop）。",
-            "bias": [
-                "你可以采取的行动如下，无优先级区分：",
-                "- create_thread ：没找到想聊的帖子？新建主题贴，展示你的表达欲",
-                "- reply ：回复现有的帖子",
-                "- dm ：有悄悄话想说？私信 DM管理员 或与其他 PC 进行私密的社交吧",
-                "只有在确实没有可做的事、或缺少必要信息时才选择 noop，并在 reason 里说明你缺少什么。",
-            ],
-            "actions": [
-                {"type": "create_thread", "required_fields": ["type", "channel_id", "title", "content"]},
-                {"type": "reply", "required_fields": ["type", "channel_id", "thread_id", "content"]},
-                {"type": "dm", "required_fields": ["type", "content"], "optional_fields": ["to_pc_id"]},
-                {"type": "noop", "required_fields": ["type"], "optional_fields": ["reason"]},
-            ],
-            "hard_constraints": [
-                "channel_id 必须来自 forum_channels[].id",
-                "thread_id 必须来自 threads_digest[].thread_id，且必须属于所选 channel_id",
-                "create_thread.title <= 80 chars；create_thread/reply.content <= 1200 chars；dm.content <= 800 chars",
-                "dm: 省略 to_pc_id 表示发给 DM；填写 to_pc_id 表示发给某个 PC（必须是 pcs[].id 且不能等于 pc_id）",
-            ],
-            "writing_style": [
-                "用符合你的人设的语气发言，论坛很自由，没有硬性的格式规定。",
-                "避免空泛表态（如“收到/好的/我会努力”）。",
-            ],
-        }
+        persona_text = (persona or "").strip() or f"你是{pc_name}。"
 
-        user_payload = {
-            "pc_id": pc_id,
-            "pc_name": pc_name,
-            "since": since,
-            "pcs": [{"id": p.id, "name": p.name} for p in self._engine.pcs],
-            "forum_channels": forum_channels,
-            "threads_digest": threads_digest,
-            "inbox_digest": inbox_lines,
-            "recall": recall,
-        }
+        pcs = [{"id": p.id, "name": p.name} for p in self._engine.pcs]
 
-        messages = [
-            {"role": "system", "content": f"{system}\n\nYou must follow the rules strictly:\n{json.dumps(rules, ensure_ascii=False)}"},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-        ]
+        messages = render_prompt_messages(
+            "tick_runner.forum_action",
+            {
+                "pc_id": pc_id,
+                "pc_name": pc_name,
+                "persona": persona_text,
+                "pcs_json": json.dumps(pcs, ensure_ascii=False),
+                "forum_channels_json": json.dumps(forum_channels, ensure_ascii=False),
+                "threads_digest_json": json.dumps(threads_digest, ensure_ascii=False),
+                "inbox_digest_json": json.dumps(inbox_lines, ensure_ascii=False),
+                "recall_json": json.dumps(recall, ensure_ascii=False),
+            },
+        )
 
         model = getattr(next((p for p in self._engine.pcs if p.id == pc_id), None), "model", None)
         if not isinstance(model, str) or not model.strip():

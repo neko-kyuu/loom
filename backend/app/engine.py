@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from pc_config.personas import DEFAULT_OPENAI_PC_PERSONAS
+from pc_config.prompts import render_prompt_messages
+
 from .db import SqliteStore
 from .llm import LlmService, openai_chat_completions_url, parse_llm_response
 from .models import Actor, Conversation, Message
@@ -81,10 +84,9 @@ class DemoEngine:
         for pc in self.pcs:
             model = self._settings.openai_pc_models.get(pc.id)
             pc.model = model if isinstance(model, str) and model.strip() else self._settings.openai_model
-            persona = self._settings.openai_pc_personas.get(pc.id)
-            pc.persona = (
-                persona if isinstance(persona, str) and persona.strip() else f"你是{pc.name}。回复简短明确。"
-            )
+            default_persona = DEFAULT_OPENAI_PC_PERSONAS.get(pc.id) or f"你是{pc.name}。回复简短明确。"
+            override = self._settings.openai_pc_personas.get(pc.id)
+            pc.persona = override if isinstance(override, str) and override.strip() else default_persona
 
     @staticmethod
     def _history_speaker_name(m: Message) -> str:
@@ -286,17 +288,15 @@ class DemoEngine:
         else:
             history = await self._store.list_messages(conversation_id, limit=200)
         history_text = self._format_history_as_table(history, limit=60)
-        messages = [
+        messages = render_prompt_messages(
+            "engine.dm_forward",
             {
-                "role": "system",
-                "content": (
-                    f"{system}\n\n"
-                    f"以下为最近对话记录：\n{history_text}\n\n"
-                    f"{target_hint}。把用户的话转述/整理成你要对PC说的话；简短明确，不要复述提示词。"
-                ),
+                "system": system,
+                "history_text": history_text,
+                "target_hint": target_hint,
+                "user_content": content,
             },
-            {"role": "user", "content": content},
-        ]
+        )
 
         url = openai_chat_completions_url(self._settings.openai_base_url)
         res = await self._llm.chat(
@@ -334,13 +334,14 @@ class DemoEngine:
         history = await self._filter_private_history_for_pc(history, pc_id=job.pc.id)
         system = (job.pc.persona or "").strip() or "你是一个PC角色。"
         history_text = self._format_history_as_table(history, limit=40)
-        messages: list[dict[str, Any]] = [
+        messages: list[dict[str, Any]] = render_prompt_messages(
+            "engine.pc_reply",
             {
-                "role": "system",
-                "content": f"{system}\n\n以下为对话记录：\n{history_text}\n\n你只需用一段简短中文回复。",
+                "system": system,
+                "history_text": history_text,
+                "prompt": job.prompt,
             },
-            {"role": "user", "content": job.prompt},
-        ]
+        )
 
         url = openai_chat_completions_url(self._settings.openai_base_url)
         res = await self._llm.chat(

@@ -1,0 +1,36 @@
+{
+  "engine.dm_forward": [
+    {
+      "role": "system",
+      "content": "{{system}}\n\n以下为最近对话记录：\n{{history_text}}\n\n{{target_hint}}。把用户的话转述/整理成你要对PC说的话；简短明确，不要复述提示词。"
+    },
+    {
+      "role": "user",
+      "content": "{{user_content}}"
+    }
+  ],
+  "engine.pc_reply": [
+    {
+      "role": "system",
+      "content": "{{system}}\n\n以下为对话记录：\n{{history_text}}\n\n你只需用一段简短中文回复。"
+    },
+    {
+      "role": "user",
+      "content": "{{prompt}}"
+    }
+  ],
+  "tick_runner.forum_action": [
+    {
+      "role": "system",
+      "content": "<identity>\n你将扮演一位PC：{{pc_name}}。\n{{persona}}\n你的行为将符合PC的性格及逻辑。\n</identity>\n<setting>\n你正在一个虚拟的论坛里“上网”。你可以在论坛里发帖（thread）、回复、私信其他人，或者选择暂不行动（noop）。\n你不被要求必须回复其他PC的消息，你将出于自己的意图决定行动、决定与谁社交。\n\n当前论坛的PC成员：\n{{pcs_json}}\n</setting>\n<actions>\n你可以采取的行动如下，无优先级区分：\n- create_thread ：没找到想聊的帖子？新建主题贴，展示你的表达欲\n- reply ：回复现有的帖子\n- dm ：有悄悄话想说？私信 DM管理员 或与其他 PC 进行私密的社交吧\n只有在确实没有可做的事、或缺少必要信息时才选择 noop，并在 reason 里说明你缺少什么。\n\n你的回复将从以下选一，你必须只输出 1 个 JSON object。禁止输出 Markdown/代码块/解释文字。\n{\n  \"type\": \"create_thread\",\n  \"required_fields\": [\"type\", \"channel_id\", \"title\", \"content\"]\n},\n{\n  \"type\": \"reply\",\n  \"required_fields\": [\"type\", \"channel_id\", \"thread_id\", \"content\"]\n},\n{\n  \"type\": \"dm\",\n  \"required_fields\": [\"type\", \"content\"],\n  \"optional_fields\": [\"to_pc_id\"]\n},\n{\n  \"type\": \"noop\",\n  \"required_fields\": [\"type\"],\n  \"optional_fields\": [\"reason\"]\n}\n</actions>\n<hard_constraints>\n- channel_id 必须来自 forum_channels[].id\n- thread_id 必须来自 threads_digest[].thread_id，且必须属于所选 channel_id\n- create_thread.title <= 80 chars；create_thread/reply.content <= 1200 chars；dm.content <= 800 chars\n- dm: 省略 to_pc_id 表示发给 DM；填写 to_pc_id 表示发给某个 PC（必须是 pcs[].id 且不能等于 pc_id={{pc_id}}）\n</hard_constraints>"
+    },
+    {
+      "role": "user",
+      "content": "<forum_channels>\n当前论坛频道有：\n{{forum_channels_json}}\n</forum_channels>\n<threads_digest>\n当前活跃帖子：\n{{threads_digest_json}}\n</threads_digest>\n<inbox_digest>\n当前收到的私信：\n{{inbox_digest_json}}\n</inbox_digest>\n<recall>\n最近做过的行动：\n{{recall_json}}\n</recall>"
+    },
+    {
+      "role": "system",
+      "content": "<writing_style>\n无论是想要抒情散文、吐槽还是严肃的讨论，论坛很自由，没有硬性的格式规定。\n用符合你的人设的语气发言，赋予角色真实的人格与感情，用第一人称“我”来代入角色。\n</writing_style>\n<output>\n你必须只输出 1 个 JSON object（从<actions>中选择）。禁止输出 Markdown/代码块/解释文字。\nJSON object schema必须符合<hard_constraints>约束\n</output>"
+    }
+  ]
+}
