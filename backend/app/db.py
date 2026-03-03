@@ -222,6 +222,15 @@ class SqliteStore:
         msgs.reverse()
         return msgs
 
+    async def count_messages_by_thread_in_conversation(self, *, thread_id: str, conversation_id: str) -> int:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                "SELECT COUNT(1) AS c FROM messages WHERE thread_id=? AND conversation_id=?",
+                (thread_id, conversation_id),
+            )
+            row = await cur.fetchone()
+        return int(row[0] if row else 0)
+
     async def list_messages_by_send_batch_id(self, send_batch_id: str, limit: int = 500) -> list[Message]:
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
@@ -280,6 +289,35 @@ class SqliteStore:
             cur = await db.execute("SELECT COUNT(1) AS c FROM messages WHERE thread_id=?", (thread_id,))
             row = await cur.fetchone()
         return int(row[0] if row else 0)
+
+    async def touch_forum_thread_from_message(self, message: Message) -> None:
+        """
+        If `message` is a public post in a forum thread (i.e. message.conversation_id matches thread.channel_id),
+        update forum thread metadata (last_activity_at, reply_count).
+        """
+        tid = message.thread_id
+        if not isinstance(tid, str) or not tid.strip():
+            return
+
+        thread = await self.get_forum_thread(tid)
+        if not thread:
+            return
+        if message.conversation_id != thread.channel_id:
+            return
+
+        total = await self.count_messages_by_thread_in_conversation(thread_id=tid, conversation_id=thread.channel_id)
+        thread.last_activity_at = message.timestamp
+        thread.reply_count = max(0, total - 1)
+        await self.upsert_forum_threads([thread])
+
+    async def append_message(self, message: Message) -> None:
+        """
+        Centralized append path:
+        - insert message
+        - if it belongs to a forum thread's public conversation, touch the thread metadata
+        """
+        await self.add_message(message)
+        await self.touch_forum_thread_from_message(message)
 
     async def delete_forum_thread(self, thread_id: str) -> None:
         async with aiosqlite.connect(self._path) as db:

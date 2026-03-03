@@ -123,5 +123,5 @@ class WsClientToServer(BaseModel):
 
 
 class WsServerToClient(BaseModel):
-    type: Literal["state", "message", "typing", "queue", "error"]
+    type: Literal["state", "message", "typing", "queue", "forum_thread", "error"]
     payload: dict

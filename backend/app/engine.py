@@ -70,10 +70,10 @@ class DemoEngine:
         )
 
         self.pcs: list[PC] = [
-            PC(id="pc_1", name="Alice"),
-            PC(id="pc_2", name="Bob"),
-            PC(id="pc_3", name="Cathy"),
-            PC(id="pc_4", name="Dylan"),
+            PC(id="pc_1", name="伊斯"),
+            PC(id="pc_2", name="弥亚"),
+            PC(id="pc_3", name="莱文哈特"),
+            PC(id="pc_4", name="埃尔维斯"),
         ]
         self._apply_llm_profiles()
 
@@ -197,6 +197,9 @@ class DemoEngine:
             self._pause_event.set()
         await self._broadcast_queue_state()
 
+    def is_paused(self) -> bool:
+        return self._paused
+
     async def enqueue_pc_reaction(
         self, *, conversation_id: str, pc_id: str, prompt: str, thread_id: str | None = None
     ) -> None:
@@ -241,7 +244,7 @@ class DemoEngine:
                     to=[Actor(kind="dm", id="dm", name="DM")],
                     content=reply,
                 )
-                await self._store.add_message(message)
+                await self._store.append_message(message)
                 await self._ws.broadcast({"type": "message", "payload": message.model_dump()})
             finally:
                 await self._ws.broadcast(

@@ -352,6 +352,18 @@ export default function App() {
         }
         return;
       }
+      if (msg.type === "forum_thread") {
+        const t = msg.payload.thread;
+        setForumThreadsByChannel((prev) => {
+          const channelId = t.channel_id;
+          const existing = prev[channelId] ? [...prev[channelId]] : [];
+          const idx = existing.findIndex((x) => x.id === t.id);
+          if (idx >= 0) existing[idx] = t;
+          else existing.push(t);
+          return { ...prev, [channelId]: existing };
+        });
+        return;
+      }
       if (msg.type === "typing") {
         setTypingByConv((prev) => {
           const next: Record<string, Set<string>> = { ...prev };
