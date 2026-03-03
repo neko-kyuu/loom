@@ -219,8 +219,10 @@ class TickRunner:
             return {"type": "noop", "reason": "missing openai_base_url/api_key"}
 
         # context: recall
-        recall_items = await self._store.list_pc_activity(pc_id, since=since, limit=30)
-        recall = [
+        # NOTE: `since` is the PC's last turn start timestamp, so "new since last turn" is often 0~1 item.
+        # Keep both "recent" and "new" to avoid starving the model of context.
+        recall_recent_items = await self._store.list_pc_activity(pc_id, since=None, limit=30)
+        recall_recent = [
             {
                 "time": a.timestamp,
                 "kind": a.kind,
@@ -228,14 +230,21 @@ class TickRunner:
                 "ref_type": a.ref_type,
                 "ref_id": a.ref_id,
             }
-            for a in recall_items
+            for a in recall_recent_items
         ]
+        recall_new = recall_recent
+        if since:
+            recall_new = [x for x in recall_recent if str(x.get("time") or "") >= since]
+        recall = {"since": since, "recent": recall_recent, "new": recall_new}
 
         # context: inbox digest (DM<->PC)
-        inbox_msgs = await self._store.list_messages(f"dm_to_{pc_id}", limit=80)
+        inbox_recent_msgs = await self._store.list_messages(f"dm_to_{pc_id}", limit=80)
+        inbox_recent_lines = [self._summarize_message(m) for m in inbox_recent_msgs[-12:]]
+        inbox_new_msgs = inbox_recent_msgs
         if since:
-            inbox_msgs = [m for m in inbox_msgs if m.timestamp >= since]
-        inbox_lines = [self._summarize_message(m) for m in inbox_msgs[-12:]]
+            inbox_new_msgs = [m for m in inbox_recent_msgs if m.timestamp >= since]
+        inbox_new_lines = [self._summarize_message(m) for m in inbox_new_msgs[-12:]]
+        inbox_lines = {"since": since, "recent": inbox_recent_lines, "new": inbox_new_lines}
 
         # context: active threads digest
         convs = await self._store.list_conversations()
