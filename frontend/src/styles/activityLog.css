@@ -43,7 +43,8 @@ html[data-theme="milktea"] .activityOverlay {
 .activityBody {
   overflow: auto;
   padding: 12px 14px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   min-height: 0;
 }
