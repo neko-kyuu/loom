@@ -1,3 +1,5 @@
+import type { PcActivityLogPage } from "../types";
+
 const DEFAULT_HTTP_BASE = "http://localhost:8080";
 
 export function httpBase() {
@@ -44,6 +46,19 @@ export async function deleteForumThread(threadId: string): Promise<void> {
 
 export async function uploadAssetDataUrl(dataUrl: string): Promise<{ id: string; url: string }> {
   return await jsonFetch(`${httpBase()}/api/assets`, { method: "POST", body: JSON.stringify({ data_url: dataUrl }) });
+}
+
+export async function getPcActivityLogs(opts?: {
+  pcId?: string | null;
+  cursor?: string | null;
+  limit?: number;
+}): Promise<PcActivityLogPage> {
+  const q = new URLSearchParams();
+  if (opts?.pcId) q.set("pc_id", opts.pcId);
+  if (opts?.cursor) q.set("cursor", opts.cursor);
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return await jsonFetch(`${httpBase()}/api/pc-activity/logs${qs ? `?${qs}` : ""}`);
 }
 
 export function absoluteAssetUrl(pathOrUrl: string) {

@@ -511,6 +511,50 @@ class SqliteStore:
         out.reverse()
         return out
 
+    async def list_pc_activity_log_page(
+        self,
+        *,
+        pc_id: str | None = None,
+        cursor: tuple[str, str] | None = None,
+        limit: int = 50,
+    ) -> tuple[list[dict[str, str]], str | None]:
+        """
+        Returns newest-first activity log rows for UI infinite scrolling.
+
+        Cursor is keyset-based: (timestamp, id) of the last item in the previous page.
+        """
+        where: list[str] = []
+        params: list[str | int] = []
+
+        if pc_id:
+            where.append("pc_id=?")
+            params.append(pc_id)
+
+        if cursor:
+            cursor_ts, cursor_id = cursor
+            where.append("(timestamp < ? OR (timestamp = ? AND id < ?))")
+            params.extend([cursor_ts, cursor_ts, cursor_id])
+
+        where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, pc_id, timestamp, summary "
+                "FROM pc_activity"
+                f"{where_sql} "
+                "ORDER BY timestamp DESC, id DESC LIMIT ?",
+                (*params, limit),
+            )
+            rows = await cur.fetchall()
+
+        items = [
+            {"id": r["id"], "pc_id": r["pc_id"], "timestamp": r["timestamp"], "summary": r["summary"]}
+            for r in rows
+        ]
+        next_cursor = f"{items[-1]['timestamp']}|{items[-1]['id']}" if len(items) == limit else None
+        return items, next_cursor
+
     async def add_event(self, event: Event) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(

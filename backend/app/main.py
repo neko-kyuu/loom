@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
@@ -328,6 +328,23 @@ async def get_asset(asset_id: str) -> Response:
         raise HTTPException(status_code=404, detail="not found")
     mime, data = asset
     return Response(content=data, media_type=mime)
+
+
+@app.get("/api/pc-activity/logs")
+async def get_pc_activity_logs(
+    pc_id: str | None = None,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    cursor_tup: tuple[str, str] | None = None
+    if cursor:
+        parts = cursor.split("|", 1)
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            raise HTTPException(status_code=400, detail="bad cursor")
+        cursor_tup = (parts[0].strip(), parts[1].strip())
+
+    items, next_cursor = await store.list_pc_activity_log_page(pc_id=pc_id, cursor=cursor_tup, limit=limit)
+    return {"items": items, "next_cursor": next_cursor}
 
 
 async def _send_state(websocket: WebSocket) -> None:

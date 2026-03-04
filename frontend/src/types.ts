@@ -75,3 +75,15 @@ export type ForumPost = {
   from_actor: Actor;
   content: string;
 };
+
+export type PcActivityLogItem = {
+  id: string;
+  pc_id: string;
+  timestamp: string;
+  summary: string;
+};
+
+export type PcActivityLogPage = {
+  items: PcActivityLogItem[];
+  next_cursor: string | null;
+};

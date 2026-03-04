@@ -1,0 +1,93 @@
+.activityOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+html[data-theme="light"] .activityOverlay,
+html[data-theme="gray"] .activityOverlay,
+html[data-theme="milktea"] .activityOverlay {
+  background: rgba(15, 17, 21, 0.45);
+}
+
+.activityModal {
+  width: min(760px, 100%);
+  height: min(720px, 90vh);
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  overflow: hidden;
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.45);
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.activityHeader {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.activityTitle {
+  font-weight: 900;
+}
+
+.activityBody {
+  overflow: auto;
+  padding: 12px 14px;
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+}
+
+.activityList {
+  display: grid;
+  gap: 8px;
+}
+
+.activityRow {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.activityTime {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.activitySummary {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.activityEmpty {
+  padding: 18px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.activityHint {
+  padding: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
