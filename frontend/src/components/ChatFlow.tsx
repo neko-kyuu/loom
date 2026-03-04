@@ -1,5 +1,5 @@
 import { Check, Lock, Pencil, Send, Trash2, X } from "lucide-react";
-import { useEffect, useRef, useState, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
 import type { Actor, Message } from "../types";
 import type { ProfilesState } from "../lib/profiles";
 import { chatDisplayName, getProfile } from "../lib/profiles";
@@ -45,13 +45,24 @@ export default function ChatFlow(props: {
   const [dmPickerOpenFor, setDmPickerOpenFor] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState<string>("");
+  const [editingMinHeightPx, setEditingMinHeightPx] = useState<number>(0);
   const messagesWrapRef = useRef<HTMLDivElement | null>(null);
+  const editTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const directViewerPcId = (props.directViewerPcId || "").trim() || null;
   const pillLabel = composer
     ? composer.pill.isDirect
       ? `direct${composer.pill.directSelectedCount ? `(${composer.pill.directSelectedCount})` : ""}`
       : composer.pill.normalLabel
     : "";
+
+  useLayoutEffect(() => {
+    if (!editingMessageId) return;
+    const el = editTextareaRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    const next = Math.max(editingMinHeightPx || 0, el.scrollHeight || 0);
+    el.style.height = `${Math.max(48, next)}px`;
+  }, [editingMessageId, editingContent, editingMinHeightPx]);
 
   useEffect(() => {
     if (!dmPickerOpenFor) return;
@@ -207,9 +218,13 @@ export default function ChatFlow(props: {
                     <button
                       type="button"
                       className="msgActionBtn"
-                      onClick={() => {
+                      onClick={(e) => {
                         setEditingMessageId(m.id);
                         setEditingContent(m.content || "");
+                        const row = (e.currentTarget as HTMLElement | null)?.closest?.(".msgRow") as HTMLElement | null;
+                        const contentEl = row?.querySelector?.(".content") as HTMLElement | null;
+                        const h = contentEl?.getBoundingClientRect?.().height || 0;
+                        setEditingMinHeightPx(h ? Math.ceil(h + 18) : 0);
                       }}
                       aria-label="编辑消息"
                       title="编辑"
@@ -233,17 +248,20 @@ export default function ChatFlow(props: {
                   <div className="msgEditArea">
                     <textarea
                       className="msgEditTextarea"
+                      ref={editTextareaRef}
                       value={editingContent}
                       onChange={(e) => setEditingContent(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Escape") {
                           setEditingMessageId(null);
+                          setEditingMinHeightPx(0);
                           return;
                         }
                         if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
                           const trimmed = (editingContent || "").trim();
                           if (trimmed) props.onEditMessage?.(m.id, trimmed);
                           setEditingMessageId(null);
+                          setEditingMinHeightPx(0);
                           return;
                         }
                       }}
@@ -257,6 +275,7 @@ export default function ChatFlow(props: {
                           const trimmed = (editingContent || "").trim();
                           if (trimmed) props.onEditMessage?.(m.id, trimmed);
                           setEditingMessageId(null);
+                          setEditingMinHeightPx(0);
                         }}
                         aria-label="保存"
                         title="保存（⌘/Ctrl+Enter）"
@@ -266,7 +285,10 @@ export default function ChatFlow(props: {
                       <button
                         type="button"
                         className="msgActionBtn danger"
-                        onClick={() => setEditingMessageId(null)}
+                        onClick={() => {
+                          setEditingMessageId(null);
+                          setEditingMinHeightPx(0);
+                        }}
                         aria-label="取消"
                         title="取消（Esc）"
                       >
