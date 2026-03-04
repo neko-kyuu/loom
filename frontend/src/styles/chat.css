@@ -159,6 +159,35 @@
   line-height: 1.5;
 }
 
+.msgEditArea {
+  display: grid;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.msgEditTextarea {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  padding: 10px 10px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  outline: none;
+  line-height: 1.5;
+}
+
+.msgEditTextarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.msgEditActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .composer {
   background: var(--panel);
   padding: 12px;

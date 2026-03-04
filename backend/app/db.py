@@ -172,6 +172,14 @@ class SqliteStore:
             return None
         return Message.model_validate_json(row[0])
 
+    async def update_messages_payload(self, messages: Iterable[Message]) -> None:
+        rows = [(m.model_dump_json(), m.id) for m in messages]
+        if not rows:
+            return
+        async with aiosqlite.connect(self._path) as db:
+            await db.executemany("UPDATE messages SET payload=? WHERE id=?", rows)
+            await db.commit()
+
     async def add_message(self, message: Message) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(

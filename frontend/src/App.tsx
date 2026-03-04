@@ -379,6 +379,45 @@ export default function App() {
         wsRef.current?.send({ type: "request_state" });
         return;
       }
+      if (msg.type === "message_edited") {
+        const ids = (msg.payload?.message_ids || []).filter(Boolean);
+        const content = (msg.payload?.content || "").trim();
+        if (!ids.length || !content) return;
+        const set = new Set(ids);
+        setMessagesByConv((prev) => {
+          let changed = false;
+          const next: Record<string, Message[]> = {};
+          for (const [cid, list] of Object.entries(prev)) {
+            let listChanged = false;
+            const updated = (list || []).map((m) => {
+              if (!set.has(m.id)) return m;
+              if (m.content === content) return m;
+              listChanged = true;
+              return { ...m, content };
+            });
+            if (listChanged) changed = true;
+            next[cid] = updated;
+          }
+          return changed ? next : prev;
+        });
+        setForumPostsByThread((prev) => {
+          let changed = false;
+          const next: Record<string, Message[]> = {};
+          for (const [tid, list] of Object.entries(prev)) {
+            let listChanged = false;
+            const updated = (list || []).map((m) => {
+              if (!set.has(m.id)) return m;
+              if (m.content === content) return m;
+              listChanged = true;
+              return { ...m, content };
+            });
+            if (listChanged) changed = true;
+            next[tid] = updated;
+          }
+          return changed ? next : prev;
+        });
+        return;
+      }
       if (msg.type === "forum_thread") {
         const t = msg.payload.thread;
         setForumThreadsByChannel((prev) => {
@@ -540,6 +579,13 @@ export default function App() {
     const ok = window.confirm("删除该消息？");
     if (!ok) return;
     wsRef.current.send({ type: "delete_message", message_id: messageId });
+  }
+
+  function editMessage(messageId: string, content: string) {
+    if (!wsRef.current) return;
+    const trimmed = (content || "").trim();
+    if (!trimmed) return;
+    wsRef.current.send({ type: "edit_message", message_id: messageId, content: trimmed });
   }
 
   function sendThreadPost() {
@@ -922,6 +968,7 @@ export default function App() {
                   endRef={threadEndRef}
                   onOpenProfile={(actor, e) => openProfile(actor, e)}
                   onDeleteMessage={deleteMessage}
+                  onEditMessage={editMessage}
                   directViewerPcId={null}
                   dmTargetsByBatchId={dmTargetsByBatchId}
                   onJumpToDm={jumpToDm}
@@ -981,6 +1028,7 @@ export default function App() {
             endRef={messagesEndRef}
             onOpenProfile={(actor, e) => openProfile(actor, e)}
             onDeleteMessage={deleteMessage}
+            onEditMessage={editMessage}
             directViewerPcId={activeConv?.kind === "dm_to_pc" ? activeConv.id.replace(/^dm_to_/, "") : null}
             dmTargetsByBatchId={dmTargetsByBatchId}
             onJumpToDm={jumpToDm}

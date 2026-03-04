@@ -1,4 +1,4 @@
-import { Lock, Send, Trash2 } from "lucide-react";
+import { Check, Lock, Pencil, Send, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
 import type { Actor, Message } from "../types";
 import type { ProfilesState } from "../lib/profiles";
@@ -13,6 +13,7 @@ export default function ChatFlow(props: {
   endRef: RefObject<HTMLDivElement>;
   onOpenProfile: (actor: Actor, ev: { clientY: number; currentTarget: Element | null }) => void;
   onDeleteMessage?: (messageId: string) => void;
+  onEditMessage?: (messageId: string, content: string) => void;
   directViewerPcId?: string | null;
   dmTargetsByBatchId?: Record<string, string[]>;
   onJumpToDm?: (pcId: string, sendBatchId: string) => void;
@@ -42,6 +43,8 @@ export default function ChatFlow(props: {
   const directEnabled = Boolean(directPicker && composer?.pill.isDirect);
   const composerClassName = composer?.className || "composer";
   const [dmPickerOpenFor, setDmPickerOpenFor] = useState<string | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState<string>("");
   const messagesWrapRef = useRef<HTMLDivElement | null>(null);
   const directViewerPcId = (props.directViewerPcId || "").trim() || null;
   const pillLabel = composer
@@ -125,6 +128,7 @@ export default function ChatFlow(props: {
               name: chatDisplayName(props.profiles, { kind: "pc", id: pcId })
             }))
             .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN", { sensitivity: "base" }));
+          const isEditing = editingMessageId === m.id;
           return (
             <div key={m.id} className="msgRow" data-send-batch-id={m.send_batch_id || undefined}>
               <button className="avatarBtn" onClick={(e) => props.onOpenProfile(m.from_actor, e)} title="查看资料">
@@ -199,7 +203,21 @@ export default function ChatFlow(props: {
                     </span>
                   ) : null}
                   <div className="time">{formatTime(m.timestamp)}</div>
-                  {props.onDeleteMessage && m.from_actor.kind === "pc" ? (
+                  {props.onEditMessage && m.from_actor.kind === "pc" && !isEditing ? (
+                    <button
+                      type="button"
+                      className="msgActionBtn"
+                      onClick={() => {
+                        setEditingMessageId(m.id);
+                        setEditingContent(m.content || "");
+                      }}
+                      aria-label="编辑消息"
+                      title="编辑"
+                    >
+                      <Pencil size={12} />
+                    </button>
+                  ) : null}
+                  {props.onDeleteMessage && m.from_actor.kind === "pc" && !isEditing ? (
                     <button
                       type="button"
                       className="msgActionBtn danger"
@@ -211,7 +229,54 @@ export default function ChatFlow(props: {
                     </button>
                   ) : null}
                 </div>
-                <div className="content">{m.content}</div>
+                {isEditing ? (
+                  <div className="msgEditArea">
+                    <textarea
+                      className="msgEditTextarea"
+                      value={editingContent}
+                      onChange={(e) => setEditingContent(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") {
+                          setEditingMessageId(null);
+                          return;
+                        }
+                        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                          const trimmed = (editingContent || "").trim();
+                          if (trimmed) props.onEditMessage?.(m.id, trimmed);
+                          setEditingMessageId(null);
+                          return;
+                        }
+                      }}
+                      autoFocus
+                    />
+                    <div className="msgEditActions" role="toolbar" aria-label="编辑消息操作">
+                      <button
+                        type="button"
+                        className="msgActionBtn"
+                        onClick={() => {
+                          const trimmed = (editingContent || "").trim();
+                          if (trimmed) props.onEditMessage?.(m.id, trimmed);
+                          setEditingMessageId(null);
+                        }}
+                        aria-label="保存"
+                        title="保存（⌘/Ctrl+Enter）"
+                      >
+                        <Check size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        className="msgActionBtn danger"
+                        onClick={() => setEditingMessageId(null)}
+                        aria-label="取消"
+                        title="取消（Esc）"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="content">{m.content}</div>
+                )}
               </div>
             </div>
           );

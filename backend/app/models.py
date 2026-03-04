@@ -113,6 +113,7 @@ class WsClientToServer(BaseModel):
         "user_inject",
         "forum_post",
         "delete_message",
+        "edit_message",
         "pause",
         "resume",
     ]
@@ -125,5 +126,5 @@ class WsClientToServer(BaseModel):
 
 
 class WsServerToClient(BaseModel):
-    type: Literal["state", "message", "message_deleted", "typing", "queue", "forum_thread", "error"]
+    type: Literal["state", "message", "message_deleted", "message_edited", "typing", "queue", "forum_thread", "error"]
     payload: dict

@@ -397,6 +397,44 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 )
                 continue
 
+            if data.type == "edit_message":
+                message_id = (data.message_id or "").strip()
+                if not message_id:
+                    await websocket.send_json({"type": "error", "payload": {"message": "message_id is required"}})
+                    continue
+                new_content = (data.content or "").strip()
+                if not new_content:
+                    await websocket.send_json({"type": "error", "payload": {"message": "content is required"}})
+                    continue
+
+                msg = await store.get_message(message_id)
+                if msg is None:
+                    await websocket.send_json({"type": "error", "payload": {"message": "message not found"}})
+                    continue
+                if msg.from_actor.kind != "pc":
+                    await websocket.send_json(
+                        {"type": "error", "payload": {"message": "only pc messages can be edited in this version"}}
+                    )
+                    continue
+
+                msgs_to_update: list[Message] = []
+                if msg.send_batch_id:
+                    batch_msgs = await store.list_messages_by_send_batch_id(msg.send_batch_id, limit=500)
+                    for bm in batch_msgs:
+                        if bm.from_actor.kind != "pc":
+                            continue
+                        msgs_to_update.append(bm.model_copy(update={"content": new_content}))
+                else:
+                    msgs_to_update.append(msg.model_copy(update={"content": new_content}))
+
+                if msgs_to_update:
+                    await store.update_messages_payload(msgs_to_update)
+                ids = sorted({m.id for m in msgs_to_update}) or [message_id]
+                await ws_manager.broadcast(
+                    {"type": "message_edited", "payload": {"message_ids": ids, "content": new_content}}
+                )
+                continue
+
             if data.type == "forum_post":
                 content = (data.content or "").strip()
                 if not content:
