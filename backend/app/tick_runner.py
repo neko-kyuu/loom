@@ -239,11 +239,11 @@ class TickRunner:
 
         # context: inbox digest (DM<->PC)
         inbox_recent_msgs = await self._store.list_messages(f"dm_to_{pc_id}", limit=80)
-        inbox_recent_lines = [self._summarize_message(m) for m in inbox_recent_msgs[-12:]]
+        inbox_recent_lines = [self._summarize_message(m, max_len=800) for m in inbox_recent_msgs[-12:]]
         inbox_new_msgs = inbox_recent_msgs
         if since:
             inbox_new_msgs = [m for m in inbox_recent_msgs if m.timestamp >= since]
-        inbox_new_lines = [self._summarize_message(m) for m in inbox_new_msgs[-12:]]
+        inbox_new_lines = [self._summarize_message(m, max_len=800) for m in inbox_new_msgs[-12:]]
         inbox_lines = {"since": since, "recent": inbox_recent_lines, "new": inbox_new_lines}
 
         # context: active threads digest
