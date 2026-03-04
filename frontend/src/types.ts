@@ -35,6 +35,7 @@ export type WsServerToClient =
       };
     }
   | { type: "message"; payload: Message }
+  | { type: "message_deleted"; payload: { message_ids: string[] } }
   | { type: "forum_thread"; payload: { thread: ForumThread } }
   | { type: "typing"; payload: { conversation_id: string; pc_id: string; value: boolean } }
   | { type: "queue"; payload: { paused: boolean; queued: number } }
@@ -45,6 +46,7 @@ export type WsClientToServer =
   | { type: "request_state" }
   | { type: "pause"; value: boolean }
   | { type: "resume" }
+  | { type: "delete_message"; message_id: string }
   | {
       type: "user_inject";
       content: string;

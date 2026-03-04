@@ -1,4 +1,4 @@
-import { Lock, Send } from "lucide-react";
+import { Lock, Send, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
 import type { Actor, Message } from "../types";
 import type { ProfilesState } from "../lib/profiles";
@@ -12,6 +12,7 @@ export default function ChatFlow(props: {
   typingNames: string;
   endRef: RefObject<HTMLDivElement>;
   onOpenProfile: (actor: Actor, ev: { clientY: number; currentTarget: Element | null }) => void;
+  onDeleteMessage?: (messageId: string) => void;
   directViewerPcId?: string | null;
   dmTargetsByBatchId?: Record<string, string[]>;
   onJumpToDm?: (pcId: string, sendBatchId: string) => void;
@@ -198,6 +199,17 @@ export default function ChatFlow(props: {
                     </span>
                   ) : null}
                   <div className="time">{formatTime(m.timestamp)}</div>
+                  {props.onDeleteMessage && m.from_actor.kind === "pc" ? (
+                    <button
+                      type="button"
+                      className="msgActionBtn danger"
+                      onClick={() => props.onDeleteMessage?.(m.id)}
+                      aria-label="删除消息"
+                      title="删除"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  ) : null}
                 </div>
                 <div className="content">{m.content}</div>
               </div>

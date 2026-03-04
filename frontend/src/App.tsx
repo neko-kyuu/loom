@@ -352,6 +352,33 @@ export default function App() {
         }
         return;
       }
+      if (msg.type === "message_deleted") {
+        const ids = (msg.payload?.message_ids || []).filter(Boolean);
+        if (!ids.length) return;
+        const set = new Set(ids);
+        setMessagesByConv((prev) => {
+          let changed = false;
+          const next: Record<string, Message[]> = {};
+          for (const [cid, list] of Object.entries(prev)) {
+            const filtered = (list || []).filter((m) => !set.has(m.id));
+            if (filtered.length !== (list || []).length) changed = true;
+            next[cid] = filtered;
+          }
+          return changed ? next : prev;
+        });
+        setForumPostsByThread((prev) => {
+          let changed = false;
+          const next: Record<string, Message[]> = {};
+          for (const [tid, list] of Object.entries(prev)) {
+            const filtered = (list || []).filter((m) => !set.has(m.id));
+            if (filtered.length !== (list || []).length) changed = true;
+            next[tid] = filtered;
+          }
+          return changed ? next : prev;
+        });
+        wsRef.current?.send({ type: "request_state" });
+        return;
+      }
       if (msg.type === "forum_thread") {
         const t = msg.payload.thread;
         setForumThreadsByChannel((prev) => {
@@ -506,6 +533,13 @@ export default function App() {
     } catch {
       // ignore (keep UI as-is)
     }
+  }
+
+  function deleteMessage(messageId: string) {
+    if (!wsRef.current) return;
+    const ok = window.confirm("删除该消息？");
+    if (!ok) return;
+    wsRef.current.send({ type: "delete_message", message_id: messageId });
   }
 
   function sendThreadPost() {
@@ -887,6 +921,7 @@ export default function App() {
                   typingNames={typingNames}
                   endRef={threadEndRef}
                   onOpenProfile={(actor, e) => openProfile(actor, e)}
+                  onDeleteMessage={deleteMessage}
                   directViewerPcId={null}
                   dmTargetsByBatchId={dmTargetsByBatchId}
                   onJumpToDm={jumpToDm}
@@ -945,6 +980,7 @@ export default function App() {
             typingNames={typingNames}
             endRef={messagesEndRef}
             onOpenProfile={(actor, e) => openProfile(actor, e)}
+            onDeleteMessage={deleteMessage}
             directViewerPcId={activeConv?.kind === "dm_to_pc" ? activeConv.id.replace(/^dm_to_/, "") : null}
             dmTargetsByBatchId={dmTargetsByBatchId}
             onJumpToDm={jumpToDm}

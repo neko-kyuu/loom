@@ -112,6 +112,7 @@ class WsClientToServer(BaseModel):
         "request_state",
         "user_inject",
         "forum_post",
+        "delete_message",
         "pause",
         "resume",
     ]
@@ -119,9 +120,10 @@ class WsClientToServer(BaseModel):
     target: dict | None = None
     channel_id: str | None = None
     thread_id: str | None = None
+    message_id: str | None = None
     value: bool | None = None
 
 
 class WsServerToClient(BaseModel):
-    type: Literal["state", "message", "typing", "queue", "forum_thread", "error"]
+    type: Literal["state", "message", "message_deleted", "typing", "queue", "forum_thread", "error"]
     payload: dict

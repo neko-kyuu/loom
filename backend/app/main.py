@@ -359,6 +359,44 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await engine.set_paused(False)
                 continue
 
+            if data.type == "delete_message":
+                message_id = (data.message_id or "").strip()
+                if not message_id:
+                    await websocket.send_json({"type": "error", "payload": {"message": "message_id is required"}})
+                    continue
+
+                msg = await store.get_message(message_id)
+                if msg is not None and msg.from_actor.kind != "pc":
+                    await websocket.send_json(
+                        {"type": "error", "payload": {"message": "only pc messages can be deleted in this version"}}
+                    )
+                    continue
+
+                ids_to_delete: set[str] = {message_id}
+                thread_ids: set[str] = set()
+                if msg is not None:
+                    if msg.send_batch_id:
+                        batch_msgs = await store.list_messages_by_send_batch_id(msg.send_batch_id, limit=500)
+                        for bm in batch_msgs:
+                            if bm.from_actor.kind != "pc":
+                                continue
+                            ids_to_delete.add(bm.id)
+                            if bm.thread_id:
+                                thread_ids.add(bm.thread_id)
+                    else:
+                        if msg.thread_id:
+                            thread_ids.add(msg.thread_id)
+
+                    await store.delete_messages_by_ids(ids_to_delete)
+                    await store.delete_pc_activity_by_message_ids(ids_to_delete)
+                    for tid in thread_ids:
+                        await store.rebuild_forum_thread_meta(tid)
+
+                await ws_manager.broadcast(
+                    {"type": "message_deleted", "payload": {"message_ids": sorted(ids_to_delete)}}
+                )
+                continue
+
             if data.type == "forum_post":
                 content = (data.content or "").strip()
                 if not content:

@@ -164,6 +164,14 @@ class SqliteStore:
             rows = await cur.fetchall()
         return [Conversation.model_validate_json(r["payload"]) for r in rows]
 
+    async def get_message(self, message_id: str) -> Message | None:
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute("SELECT payload FROM messages WHERE id=?", (message_id,))
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return Message.model_validate_json(row[0])
+
     async def add_message(self, message: Message) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(
@@ -255,6 +263,25 @@ class SqliteStore:
         msgs.reverse()
         return msgs
 
+    async def delete_messages_by_ids(self, message_ids: Iterable[str]) -> None:
+        ids = [mid for mid in message_ids if isinstance(mid, str) and mid.strip()]
+        if not ids:
+            return
+        async with aiosqlite.connect(self._path) as db:
+            await db.executemany("DELETE FROM messages WHERE id=?", [(mid,) for mid in ids])
+            await db.commit()
+
+    async def delete_pc_activity_by_message_ids(self, message_ids: Iterable[str]) -> None:
+        ids = [mid for mid in message_ids if isinstance(mid, str) and mid.strip()]
+        if not ids:
+            return
+        async with aiosqlite.connect(self._path) as db:
+            await db.executemany(
+                "DELETE FROM pc_activity WHERE ref_type='message' AND ref_id=?",
+                [(mid,) for mid in ids],
+            )
+            await db.commit()
+
     async def upsert_forum_threads(self, threads: Iterable[ForumThread]) -> None:
         rows = [(t.id, t.channel_id, t.created_at, t.model_dump_json()) for t in threads]
         async with aiosqlite.connect(self._path) as db:
@@ -324,6 +351,29 @@ class SqliteStore:
             await db.execute("DELETE FROM forum_threads WHERE id=?", (thread_id,))
             await db.execute("DELETE FROM messages WHERE thread_id=?", (thread_id,))
             await db.commit()
+
+    async def rebuild_forum_thread_meta(self, thread_id: str) -> None:
+        """
+        Recomputes a forum thread's derived metadata (last_activity_at/reply_count)
+        from remaining messages in its public conversation.
+        """
+        thread = await self.get_forum_thread(thread_id)
+        if not thread:
+            return
+
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                "SELECT COUNT(1) AS c, MAX(timestamp) AS last_ts "
+                "FROM messages WHERE thread_id=? AND conversation_id=?",
+                (thread_id, thread.channel_id),
+            )
+            row = await cur.fetchone()
+        total = int(row[0] if row and row[0] is not None else 0)
+        last_ts = row[1] if row and isinstance(row[1], str) and row[1].strip() else None
+
+        thread.last_activity_at = last_ts or thread.created_at
+        thread.reply_count = max(0, total - 1)
+        await self.upsert_forum_threads([thread])
 
     async def upsert_tick(self, tick: TickRecord) -> None:
         """
