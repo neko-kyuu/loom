@@ -26,6 +26,9 @@
 }
 
 .threadListInner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 10px 10px 12px;
 }
 
@@ -34,7 +37,7 @@
   text-align: left;
   border-radius: 12px;
   padding: 10px 10px;
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   background: transparent;
   display: grid;
   gap: 6px;
