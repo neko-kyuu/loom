@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -12,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .db import SqliteStore
-from .demo_forum import build_demo_forum_seed
+from .demo_forum import DemoForumSeedConfig, build_demo_forum_seed
 from .engine import DemoEngine, ForumChannel
 from .llm import LlmService
 from .models import Actor, Message, WsClientToServer
@@ -30,6 +32,7 @@ engine = DemoEngine(settings=settings, store=store, ws=ws_manager, llm=llm)
 tick_runner = TickRunner(store=store, ws=ws_manager, engine=engine, settings=settings, llm=llm, tick_s=60.0)
 
 app = FastAPI(title=settings.app_name)
+logger = logging.getLogger(__name__)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
@@ -111,14 +114,34 @@ async def _startup() -> None:
     )
 
     # demo seed: threads + posts for forum channels
+    seed_cfg: DemoForumSeedConfig | None = None
+    seed_path = settings.demo_forum_seed_path
+    if isinstance(seed_path, str) and seed_path.strip():
+        p = Path(seed_path)
+        if p.exists() and p.is_file():
+            try:
+                seed_cfg = DemoForumSeedConfig.model_validate_json(p.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to load demo forum seed config: %s", str(p), exc_info=True)
+
     now = datetime.now(timezone.utc)
     all_forum_posts: list[Message] = []
     for ch in forum_channels:
+        announcements = None
+        if seed_cfg:
+            ch_seed = seed_cfg.channels.get(ch.id)
+            if ch_seed and ch_seed.announcements is not None:
+                announcements = ch_seed.announcements
+            else:
+                defaults = seed_cfg.defaults
+                if defaults and defaults.announcements is not None:
+                    announcements = defaults.announcements
         threads, posts = build_demo_forum_seed(
             channel_id=ch.id,
             channel_title=ch.title,
             pcs=[(p.id, p.name) for p in engine.pcs],
             now=now,
+            announcements=announcements,
         )
         await store.upsert_forum_threads(threads)
         all_forum_posts.extend(posts)

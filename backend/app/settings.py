@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # Demo mode: use fake DM/PC responses without calling external LLMs.
     demo_fake: bool = True
     demo_fake_latency_ms: int = 900
+    demo_forum_seed_path: str | None = "demo_forum_seed.json"
 
     # OpenAI-compatible config (used when demo_fake=false)
     openai_base_url: str | None = None

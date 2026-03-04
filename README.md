@@ -17,6 +17,7 @@ uv run uvicorn app.main:app --reload --port 8080
 ```
 
 配置可用 `backend/config.json`（参考 `backend/config.example.json`）或 `backend/.env`（参考 `backend/.env.example`）。
+论坛频道的 demo 公告贴可用 `backend/demo_forum_seed.json` 控制（参考 `backend/demo_forum_seed.example.json`）。
 
 ### 前端
 
