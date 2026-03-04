@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Conversation, ForumThread, Message, WsServerToClient } from "./types";
 import { createWs } from "./lib/ws";
-import { Hash, List, MessageCircle, Settings, Pause, Play, ScrollText, Trash2, X } from "lucide-react";
+import { Hash, List, MessageCircle, Settings, Pause, Play, ScrollText, Trash2, X, Pin, Lock, Unlock } from "lucide-react";
 import SettingsModal, { type SettingsTabId } from "./components/SettingsModal";
 import PcActivityLogModal from "./components/PcActivityLogModal";
 import AppearanceTab from "./components/settings/AppearanceTab";
@@ -36,6 +36,7 @@ import {
   absoluteAssetUrl,
   deleteForumThread,
   getSettingsState,
+  patchForumThread,
   putAppearanceState,
   putChannelsState,
   putProfilesState,
@@ -485,7 +486,12 @@ export default function App() {
   const activeConv = conversations.find((c) => c.id === activeConvId);
   const forumThreadsRaw = activeConv?.kind === "forum" ? forumThreadsByChannel[activeConv.id] || [] : [];
   const forumThreads = useMemo(
-    () => [...forumThreadsRaw].sort((a, b) => b.last_activity_at.localeCompare(a.last_activity_at)),
+    () =>
+      [...forumThreadsRaw].sort((a, b) => {
+        const pin = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
+        if (pin) return pin;
+        return b.last_activity_at.localeCompare(a.last_activity_at);
+      }),
     [forumThreadsRaw]
   );
   const activeForumThread = activeForumThreadId ? forumThreads.find((t) => t.id === activeForumThreadId) || null : null;
@@ -516,9 +522,45 @@ export default function App() {
   const canSendThreadPost =
     connected &&
     Boolean(activeConv?.kind === "forum" && activeForumThread) &&
+    !Boolean(activeForumThread?.locked) &&
     (threadIsDirectDraft
       ? threadDirectEffectivePcIds.length > 0 && threadDirectDraft.message.length > 0
       : threadComposerContent.trim().length > 0);
+
+  async function setThreadPinned(thread: ForumThread, pinned: boolean) {
+    try {
+      const updated = await patchForumThread(thread.id, { pinned });
+      setForumThreadsByChannel((prev) => {
+        const list = prev[updated.channel_id] || [];
+        const idx = list.findIndex((x) => x.id === updated.id);
+        if (idx < 0) return prev;
+        const next = [...list];
+        next[idx] = updated;
+        return { ...prev, [updated.channel_id]: next };
+      });
+    } catch {
+      // ignore (keep UI as-is)
+    }
+  }
+
+  async function setThreadLocked(thread: ForumThread, locked: boolean) {
+    try {
+      const updated = await patchForumThread(thread.id, { locked });
+      setForumThreadsByChannel((prev) => {
+        const list = prev[updated.channel_id] || [];
+        const idx = list.findIndex((x) => x.id === updated.id);
+        if (idx < 0) return prev;
+        const next = [...list];
+        next[idx] = updated;
+        return { ...prev, [updated.channel_id]: next };
+      });
+      if (locked) {
+        setThreadUiError("该 thread 已锁定，无法回复");
+      }
+    } catch {
+      // ignore (keep UI as-is)
+    }
+  }
 
   useEffect(() => {
     if (!isDirectDraft) {
@@ -592,6 +634,10 @@ export default function App() {
 
   function sendThreadPost() {
     if (!wsRef.current) return;
+    if (activeForumThread?.locked) {
+      setThreadUiError("该 thread 已锁定，无法回复");
+      return;
+    }
     const text = threadComposerContent.trim();
     if (!text) return;
     if (!activeConv || activeConv.kind !== "forum") {
@@ -910,12 +956,38 @@ export default function App() {
                           setThreadUiError(null);
                         }}
                       >
-                        <div className="threadItemActions" role="toolbar" aria-label="thread 操作">
-                          <button
-                            className="threadActionBtn danger"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
+	                        <div className="threadItemActions" role="toolbar" aria-label="thread 操作">
+	                          <button
+	                            className={`threadActionBtn ${t.pinned ? "on" : ""}`}
+	                            disabled={!connected}
+	                            onClick={(e) => {
+	                              e.preventDefault();
+	                              e.stopPropagation();
+	                              void setThreadPinned(t, !t.pinned);
+	                            }}
+	                            aria-label={t.pinned ? "取消置顶" : "置顶 thread"}
+	                            title={t.pinned ? "取消置顶" : "置顶"}
+	                          >
+	                            <Pin size={16} />
+	                          </button>
+	                          <button
+	                            className={`threadActionBtn ${t.locked ? "on" : ""}`}
+	                            disabled={!connected}
+	                            onClick={(e) => {
+	                              e.preventDefault();
+	                              e.stopPropagation();
+	                              void setThreadLocked(t, !t.locked);
+	                            }}
+	                            aria-label={t.locked ? "解锁 thread" : "锁定 thread"}
+	                            title={t.locked ? "解锁（允许回复）" : "锁定（禁止回复）"}
+	                          >
+	                            {t.locked ? <Lock size={16} /> : <Unlock size={16} />}
+	                          </button>
+	                          <button
+	                            className="threadActionBtn danger"
+	                            onClick={(e) => {
+	                              e.preventDefault();
+	                              e.stopPropagation();
                               void deleteThread(t.id);
                             }}
                             aria-label="删除 thread"
@@ -995,9 +1067,11 @@ export default function App() {
                       if (threadUiError) setThreadUiError(null);
                     },
                     placeholder: connected
-                      ? threadIsDirectDraft
-                        ? "私聊内容…（/direct 后面写要发送的文字）"
-                        : "在 thread 下发言…"
+                      ? activeForumThread?.locked
+                        ? "该 thread 已锁定，无法回复"
+                        : threadIsDirectDraft
+                          ? "私聊内容…（/direct 后面写要发送的文字）"
+                          : "在 thread 下发言…"
                       : "正在连接后端…",
                     error: threadUiError,
                     onClearError: () => {

@@ -66,6 +66,8 @@ export type ForumThread = {
   created_by: Actor;
   last_activity_at: string;
   reply_count: number;
+  pinned: boolean;
+  locked: boolean;
 };
 
 export type ForumPost = {

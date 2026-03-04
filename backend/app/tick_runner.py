@@ -252,18 +252,32 @@ class TickRunner:
         for c in forum_convs:
             threads = await self._store.list_forum_threads(c.id)
             for t in threads[:30]:
+                title = t.title
+                if t.locked and "已锁定，请勿回复" not in title:
+                    title = f"{title} 已锁定，请勿回复"
                 threads_all.append(
                     {
                         "channel_id": t.channel_id,
                         "thread_id": t.id,
-                        "title": t.title,
+                        "title": title,
                         "reply_count": t.reply_count,
+                        "last_activity_at": t.last_activity_at,
+                        "pinned": t.pinned,
+                        "locked": t.locked,
                     }
                 )
-        threads_all.sort(key=lambda x: str(x.get("last_activity_at") or ""), reverse=True)
+        threads_all.sort(
+            key=lambda x: (
+                1 if x.get("pinned") else 0,
+                str(x.get("last_activity_at") or ""),
+            ),
+            reverse=True,
+        )
         threads_digest = threads_all[:12]
         # TODO: Use the function tool to allow the PC to browse history(thread_posts) on demand.
         for td in threads_digest:
+            if td.get("locked") is True:
+                continue
             thread_id = str(td.get("thread_id") or "").strip()
             if not thread_id:
                 td["thread_posts"] = []
@@ -436,6 +450,8 @@ class TickRunner:
             created_by=Actor(kind="pc", id=pc_id, name=pc_name),
             last_activity_at=now,
             reply_count=0,
+            pinned=False,
+            locked=False,
         )
         await self._store.upsert_forum_threads([thread])
 
@@ -470,6 +486,17 @@ class TickRunner:
         thread = await self._store.get_forum_thread(thread_id)
         if not thread or thread.channel_id != channel_id:
             raise ValueError("thread not found or does not belong to channel")
+        if thread.locked:
+            await self._store.add_pc_activity(
+                PcActivity(
+                    pc_id=pc_id,
+                    kind="reply_blocked",
+                    summary=f"{pc_name}：尝试回复已锁定 thread《{thread.title}》（已跳过）",
+                    ref_type="thread",
+                    ref_id=thread.id,
+                )
+            )
+            return [{"kind": "reply_blocked", "thread_id": thread.id}]
 
         msg = Message(
             conversation_id=channel_id,

@@ -1,4 +1,4 @@
-import type { PcActivityLogPage } from "../types";
+import type { ForumThread, PcActivityLogPage } from "../types";
 
 const DEFAULT_HTTP_BASE = "http://localhost:8080";
 
@@ -42,6 +42,17 @@ export async function putChannelsState(payload: any): Promise<void> {
 
 export async function deleteForumThread(threadId: string): Promise<void> {
   await jsonFetch(`${httpBase()}/api/forum/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
+}
+
+export async function patchForumThread(
+  threadId: string,
+  patch: { pinned?: boolean; locked?: boolean }
+): Promise<ForumThread> {
+  const res = await jsonFetch<{ ok: true; thread: ForumThread }>(
+    `${httpBase()}/api/forum/threads/${encodeURIComponent(threadId)}`,
+    { method: "PATCH", body: JSON.stringify(patch) }
+  );
+  return res.thread;
 }
 
 export async function uploadAssetDataUrl(dataUrl: string): Promise<{ id: string; url: string }> {

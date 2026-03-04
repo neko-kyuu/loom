@@ -88,6 +88,12 @@
   color: var(--text);
 }
 
+.threadActionBtn.on {
+  background: color-mix(in srgb, var(--accent) 14%, rgba(255, 255, 255, 0.03));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: color-mix(in srgb, var(--accent) 65%, var(--text));
+}
+
 .threadActionBtn.danger:hover {
   border-color: rgba(255, 0, 0, 0.25);
   color: #ffb4b4;

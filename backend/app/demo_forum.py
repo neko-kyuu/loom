@@ -135,6 +135,8 @@ def build_demo_forum_seed(
             created_by=dm,
             last_activity_at=last_activity_at,
             reply_count=reply_count,
+            pinned=False,
+            locked=False,
         )
 
     threads: list[ForumThread] = []

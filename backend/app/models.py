@@ -36,6 +36,8 @@ class ForumThread(BaseModel):
     created_by: Actor
     last_activity_at: str
     reply_count: int = 0
+    pinned: bool = False
+    locked: bool = False
 
 
 class Message(BaseModel):

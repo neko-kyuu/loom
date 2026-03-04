@@ -389,7 +389,10 @@ export default function ChatFlow(props: {
                 composer.onClearError();
               }}
               onKeyDown={(e) => {
-                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") composer.onSend();
+                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  if (composer.canSend) composer.onSend();
+                }
               }}
             />
 

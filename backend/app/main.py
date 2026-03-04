@@ -284,6 +284,31 @@ async def delete_forum_thread(thread_id: str) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.patch("/api/forum/threads/{thread_id}")
+async def patch_forum_thread(thread_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    pinned = payload.get("pinned")
+    locked = payload.get("locked")
+    if pinned is None and locked is None:
+        raise HTTPException(status_code=400, detail="pinned or locked is required")
+    if pinned is not None and not isinstance(pinned, bool):
+        raise HTTPException(status_code=400, detail="pinned must be boolean")
+    if locked is not None and not isinstance(locked, bool):
+        raise HTTPException(status_code=400, detail="locked must be boolean")
+
+    thread = await store.get_forum_thread(thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="thread not found")
+
+    if pinned is not None:
+        thread.pinned = pinned
+    if locked is not None:
+        thread.locked = locked
+
+    await store.upsert_forum_threads([thread])
+    await ws_manager.broadcast({"type": "forum_thread", "payload": {"thread": thread.model_dump()}})
+    return {"ok": True, "thread": thread.model_dump()}
+
+
 @app.post("/api/assets")
 async def upload_asset(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """
@@ -475,6 +500,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 if thread is None or thread.channel_id != channel_id:
                     await websocket.send_json({"type": "error", "payload": {"message": "thread not found"}})
                     continue
+                if thread.locked:
+                    await websocket.send_json({"type": "error", "payload": {"message": "thread is locked"}})
+                    continue
 
                 msg = Message(
                     conversation_id=channel_id,
@@ -519,6 +547,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     thread = await store.get_forum_thread(origin_thread_id)
                     if thread is None or thread.channel_id != origin_channel_id:
                         await websocket.send_json({"type": "error", "payload": {"message": "origin thread not found"}})
+                        continue
+                    if thread.locked:
+                        await websocket.send_json({"type": "error", "payload": {"message": "thread is locked"}})
                         continue
 
                 kind = target.get("kind") if isinstance(target, dict) else None
