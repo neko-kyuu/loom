@@ -187,7 +187,7 @@ class TickRunner:
         if len(content) > max_len:
             content = content[:max_len] + "…"
         content = content.replace("\n", "\\n")
-        return f"{m.timestamp[:19]} {who}: {content}"
+        return f"{who}: {content}"
 
     @staticmethod
     def _try_parse_json_loose(text: str) -> Any | None:
@@ -224,7 +224,6 @@ class TickRunner:
         recall_recent_items = await self._store.list_pc_activity(pc_id, since=None, limit=30)
         recall_recent = [
             {
-                "time": a.timestamp,
                 "kind": a.kind,
                 "summary": a.summary,
                 "ref_type": a.ref_type,
@@ -235,7 +234,7 @@ class TickRunner:
         recall_new = recall_recent
         if since:
             recall_new = [x for x in recall_recent if str(x.get("time") or "") >= since]
-        recall = {"since": since, "recent": recall_recent, "new": recall_new}
+        recall = {"recent": recall_recent, "new": recall_new}
 
         # context: inbox digest (DM<->PC)
         inbox_recent_msgs = await self._store.list_messages(f"dm_to_{pc_id}", limit=80)
@@ -244,7 +243,7 @@ class TickRunner:
         if since:
             inbox_new_msgs = [m for m in inbox_recent_msgs if m.timestamp >= since]
         inbox_new_lines = [self._summarize_message(m, max_len=800) for m in inbox_new_msgs[-12:]]
-        inbox_lines = {"since": since, "recent": inbox_recent_lines, "new": inbox_new_lines}
+        inbox_lines = {"recent": inbox_recent_lines, "new": inbox_new_lines}
 
         # context: active threads digest
         convs = await self._store.list_conversations()
@@ -258,7 +257,6 @@ class TickRunner:
                         "channel_id": t.channel_id,
                         "thread_id": t.id,
                         "title": t.title,
-                        "last_activity_at": t.last_activity_at,
                         "reply_count": t.reply_count,
                     }
                 )

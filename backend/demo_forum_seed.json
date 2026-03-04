@@ -1,0 +1,31 @@
+{
+  "defaults": {
+    "announcements": [
+      {
+        "key": "posting_guide",
+        "title": "【公告】发帖指南 - 请勿回复",
+        "content": "这里是 {channel_title}（论坛频道）。每个 thread 是一个可追溯的剧情片段。\n\n- 新开 thread：建议用一句话概括剧情焦点\n- 回复：尽量具体描述行动/对话\n- 禁止回复公告贴（保持置顶信息干净）"
+      }
+    ]
+  },
+  "channels": {
+    "forum_rose_garden_salon": {
+      "announcements": [
+        {
+          "key": "etiquette",
+          "title": "【公告】茶会礼仪 - 请勿回复",
+          "content": "欢迎来到 {channel_title}：\n- 今日推荐茶点：龙舌酱配蜂蜜酒\n\n- 争执请保持克制（必要时由DM介入）\n- 菜单可自助，需要服务员时直接 私信DM \n（OOC：美食RP重度区，欢迎配图或写详细菜谱！）"
+        }
+      ]
+    },
+    "forum_guilds_complex": {
+      "announcements": [
+        {
+          "key": "jobs",
+          "title": "【公告】办事窗口与委托格式 - 请勿回复",
+          "content": "这里是 {channel_title}。\n\n建议发帖格式：\n- 【委托】标题\n- 背景：1-2句话\n- 需求：你希望调查/制作/采购什么\n- 时间：紧急/一般/长期\n\n需要盖章/开证明：直接 私信DM 说明用途。"
+        }
+      ]
+    }
+  }
+}
