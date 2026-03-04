@@ -178,10 +178,82 @@ def _try_parse_json(text: str) -> Any | None:
     s = _strip_markdown_code_fence(text)
     if not s:
         return None
-    try:
-        return json.loads(s)
-    except Exception:  # noqa: BLE001
+
+    def _loads_maybe_twice(payload: str) -> Any | None:
+        try:
+            v = json.loads(payload)
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(v, str):
+            vv = v.strip()
+            if vv.startswith("{") or vv.startswith("["):
+                try:
+                    return json.loads(vv)
+                except Exception:  # noqa: BLE001
+                    return v
+        return v
+
+    parsed = _loads_maybe_twice(s)
+    if parsed is not None:
+        return parsed
+
+    # Common LLM failure mode: produces "almost-JSON" with unescaped quotes/newlines
+    # inside string values (e.g. `..."英文引号内"...`), which breaks strict JSON.
+    ss = s.lstrip()
+    if not (ss.startswith("{") or ss.startswith("[")):
         return None
+
+    repaired_chars: list[str] = []
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(s):
+        if not in_string:
+            repaired_chars.append(ch)
+            if ch == '"':
+                in_string = True
+                escaped = False
+            continue
+
+        if escaped:
+            repaired_chars.append(ch)
+            escaped = False
+            continue
+
+        if ch == "\\":
+            repaired_chars.append(ch)
+            escaped = True
+            continue
+
+        if ch == "\n":
+            repaired_chars.append("\\n")
+            continue
+        if ch == "\r":
+            repaired_chars.append("\\n")
+            continue
+        if ch == "\t":
+            repaired_chars.append("\\t")
+            continue
+
+        if ch == '"':
+            j = i + 1
+            while j < len(s) and s[j] in " \t\r\n":
+                j += 1
+            nxt = s[j] if j < len(s) else ""
+            # If it doesn't look like the end of a JSON string, treat it as an
+            # unescaped literal quote and escape it.
+            if nxt and nxt not in {":", ",", "}", "]"}:
+                repaired_chars.append('\\"')
+            else:
+                repaired_chars.append('"')
+                in_string = False
+            continue
+
+        repaired_chars.append(ch)
+
+    repaired = "".join(repaired_chars)
+    if repaired == s:
+        return None
+    return _loads_maybe_twice(repaired)
 
 
 def _normalize_markdown(text: str) -> str:
