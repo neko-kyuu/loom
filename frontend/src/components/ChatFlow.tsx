@@ -214,7 +214,7 @@ export default function ChatFlow(props: {
                     </span>
                   ) : null}
                   <div className="time">{formatTime(m.timestamp)}</div>
-                  {props.onEditMessage && m.from_actor.kind === "pc" && !isEditing ? (
+                  {props.onEditMessage && (m.from_actor.kind === "pc" || m.from_actor.kind === 'dm') && !isEditing ? (
                     <button
                       type="button"
                       className="msgActionBtn"
@@ -232,7 +232,7 @@ export default function ChatFlow(props: {
                       <Pencil size={12} />
                     </button>
                   ) : null}
-                  {props.onDeleteMessage && m.from_actor.kind === "pc" && !isEditing ? (
+                  {props.onDeleteMessage && (m.from_actor.kind === "pc" || m.from_actor.kind === 'dm') && !isEditing ? (
                     <button
                       type="button"
                       className="msgActionBtn danger"

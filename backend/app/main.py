@@ -473,9 +473,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     continue
 
                 msg = await store.get_message(message_id)
-                if msg is not None and msg.from_actor.kind != "pc":
+                if msg is not None and msg.from_actor.kind not in ("pc", "dm"):
                     await websocket.send_json(
-                        {"type": "error", "payload": {"message": "only pc messages can be deleted in this version"}}
+                        {
+                            "type": "error",
+                            "payload": {"message": "only pc/dm messages can be deleted in this version"},
+                        }
                     )
                     continue
 
@@ -485,7 +488,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     if msg.send_batch_id:
                         batch_msgs = await store.list_messages_by_send_batch_id(msg.send_batch_id, limit=500)
                         for bm in batch_msgs:
-                            if bm.from_actor.kind != "pc":
+                            if bm.from_actor.kind not in ("pc", "dm"):
                                 continue
                             ids_to_delete.add(bm.id)
                             if bm.thread_id:
@@ -518,9 +521,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 if msg is None:
                     await websocket.send_json({"type": "error", "payload": {"message": "message not found"}})
                     continue
-                if msg.from_actor.kind != "pc":
+                if msg.from_actor.kind not in ("pc", "dm"):
                     await websocket.send_json(
-                        {"type": "error", "payload": {"message": "only pc messages can be edited in this version"}}
+                        {"type": "error", "payload": {"message": "only pc/dm messages can be edited in this version"}}
                     )
                     continue
 
@@ -528,7 +531,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 if msg.send_batch_id:
                     batch_msgs = await store.list_messages_by_send_batch_id(msg.send_batch_id, limit=500)
                     for bm in batch_msgs:
-                        if bm.from_actor.kind != "pc":
+                        if bm.from_actor.kind not in ("pc", "dm"):
                             continue
                         msgs_to_update.append(bm.model_copy(update={"content": new_content}))
                 else:
