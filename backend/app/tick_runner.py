@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -42,6 +43,8 @@ class TickRunner:
         settings: Settings,
         llm: LlmService | None = None,
         tick_s: float = 60.0,
+        dm_digest_s: float = 600.0,
+        dm_bootstrap_lookback_s: float = 600.0,
         state_key: str = "tick_runner_state",
     ) -> None:
         self._store = store
@@ -50,6 +53,8 @@ class TickRunner:
         self._settings = settings
         self._llm = llm
         self._tick_s = tick_s
+        self._dm_digest_s = dm_digest_s
+        self._dm_bootstrap_lookback_s = dm_bootstrap_lookback_s
         self._state_key = state_key
 
         self._lock = asyncio.Lock()
@@ -165,6 +170,18 @@ class TickRunner:
                     state.last_turn_by_pc = {}
                 state.last_turn_by_pc[pc.id] = tick.started_at
                 await self._save_state(state)
+
+            await self._run_dm_digest_if_due()
+
+    @staticmethod
+    def _parse_iso_utc_loose(s: str) -> datetime | None:
+        try:
+            dt = datetime.fromisoformat(s)
+        except Exception:  # noqa: BLE001
+            return None
+        if dt.tzinfo is None:
+            return None
+        return dt.astimezone(timezone.utc)
 
     async def _build_action_context(self) -> ActionValidationContext:
         convs = await self._store.list_conversations()
@@ -344,6 +361,440 @@ class TickRunner:
             if isinstance(j, dict):
                 return j
         return {"type": "noop", "reason": "llm output parse failed"}
+
+    async def _build_dm_digest_context(self, *, since: str, until: str) -> dict[str, Any]:
+        pcs = [{"id": p.id, "name": p.name} for p in self._engine.pcs]
+        pc_name_by_id = {p["id"]: p["name"] for p in pcs}
+
+        def is_to_dm(m: Message) -> bool:
+            return any(a.kind == "dm" for a in (m.to or []))
+
+        # direct: PC -> DM messages in dm_to_<pc> conversations
+        direct_new: list[dict[str, Any]] = []
+        direct_recent_by_pc: list[dict[str, Any]] = []
+        for p in self._engine.pcs:
+            conv_id = f"dm_to_{p.id}"
+            recent_msgs = await self._store.list_messages(conv_id, limit=120)
+            recent_to_dm = [m for m in recent_msgs if is_to_dm(m)]
+            recent_lines = [self._summarize_message(m, max_len=800) for m in recent_to_dm[-6:]]
+            if recent_lines:
+                direct_recent_by_pc.append({"pc_id": p.id, "pc_name": p.name, "recent_lines": recent_lines})
+
+            new_msgs = await self._store.list_messages_since(conv_id, since=since, limit=200)
+            new_to_dm = [m for m in new_msgs if is_to_dm(m)]
+            for m in new_to_dm[-30:]:
+                direct_new.append(
+                    {
+                        "pc_id": p.id,
+                        "pc_name": p.name,
+                        "timestamp": m.timestamp,
+                        "message_id": m.id,
+                        "line": self._summarize_message(m, max_len=1200),
+                    }
+                )
+        direct_new.sort(key=lambda x: (str(x.get("timestamp") or ""), str(x.get("message_id") or "")))
+        direct_digest: dict[str, Any] = {
+            "new_count": len(direct_new),
+            "new": direct_new[-30:],
+            "recent_by_pc": direct_recent_by_pc,
+        }
+
+        # forum: thread digests + new posts since window
+        convs = await self._store.list_conversations()
+        forum_convs = [c for c in convs if c.kind == "forum"]
+        forum_channels = [{"id": c.id, "title": c.title, "description": c.description} for c in forum_convs]
+        channel_title_by_id = {c["id"]: c["title"] for c in forum_channels}
+
+        threads_all: list[ForumThread] = []
+        for c in forum_convs:
+            threads_all.extend(await self._store.list_forum_threads(c.id))
+        thread_by_id = {t.id: t for t in threads_all}
+        threads_all.sort(
+            key=lambda t: (
+                1 if t.pinned else 0,
+                str(t.last_activity_at or ""),
+            ),
+            reverse=True,
+        )
+        threads_digest: list[dict[str, Any]] = []
+        forum_new_items: list[dict[str, Any]] = []
+        for c in forum_convs:
+            new_msgs = await self._store.list_messages_since(c.id, since=since, limit=500)
+            for m in new_msgs:
+                if m.from_actor.kind == "dm":
+                    continue
+                tid = m.thread_id
+                if not isinstance(tid, str) or not tid.strip():
+                    continue
+                t = thread_by_id.get(tid)
+                forum_new_items.append(
+                    {
+                        "channel_id": c.id,
+                        "channel_title": channel_title_by_id.get(c.id) or c.id,
+                        "thread_id": tid,
+                        "thread_title": t.title if t else tid,
+                        "timestamp": m.timestamp,
+                        "message_id": m.id,
+                        "line": self._summarize_message(m, max_len=1200),
+                    }
+                )
+        forum_new_items.sort(key=lambda x: (str(x.get("timestamp") or ""), str(x.get("message_id") or "")))
+        forum_new_count = len(forum_new_items)
+
+        for t in threads_all[:12]:
+            msgs = await self._store.list_messages_by_thread(t.id, limit=120)
+            public_msgs = [m for m in msgs if m.conversation_id == t.channel_id]
+            recent_posts = [self._summarize_message(m, max_len=1200) for m in public_msgs[-6:]]
+            new_posts_msgs = [m for m in public_msgs if m.timestamp >= since and m.from_actor.kind != "dm"]
+            new_posts = [self._summarize_message(m, max_len=1200) for m in new_posts_msgs[-8:]]
+            threads_digest.append(
+                {
+                    "channel_id": t.channel_id,
+                    "channel_title": channel_title_by_id.get(t.channel_id) or t.channel_id,
+                    "thread_id": t.id,
+                    "title": t.title,
+                    "reply_count": t.reply_count,
+                    "last_activity_at": t.last_activity_at,
+                    "pinned": t.pinned,
+                    "locked": t.locked,
+                    "new_posts": new_posts,
+                    "recent_posts": recent_posts,
+                }
+            )
+        forum_digest: dict[str, Any] = {
+            "new_count": forum_new_count,
+            "new_items": forum_new_items[-30:],
+            "threads_digest": threads_digest,
+        }
+
+        # broadcast: new messages since window (exclude DM's own messages to avoid self-loop)
+        recent_broadcast = await self._store.list_messages("broadcast", limit=120)
+        recent_broadcast = [m for m in recent_broadcast if m.from_actor.kind != "dm"]
+        recent_lines = [self._summarize_message(m, max_len=800) for m in recent_broadcast[-12:]]
+
+        new_broadcast = await self._store.list_messages_since("broadcast", since=since, limit=200)
+        new_broadcast = [m for m in new_broadcast if m.from_actor.kind != "dm"]
+        new_lines = [self._summarize_message(m, max_len=800) for m in new_broadcast[-20:]]
+        broadcast_digest: dict[str, Any] = {
+            "new_count": len(new_broadcast),
+            "new_lines": new_lines,
+            "recent_lines": recent_lines,
+        }
+
+        required_type = "noop"
+        if direct_digest["new_count"] > 0:
+            required_type = "dm"
+        elif forum_digest["new_count"] > 0 or broadcast_digest["new_count"] > 0:
+            required_type = "broadcast"
+
+        return {
+            "pcs": pcs,
+            "pc_ids": [p["id"] for p in pcs],
+            "pc_name_by_id": pc_name_by_id,
+            "forum_channels": forum_channels,
+            "direct_digest": direct_digest,
+            "forum_digest": forum_digest,
+            "broadcast_digest": broadcast_digest,
+            "required_type": required_type,
+            "since": since,
+            "until": until,
+        }
+
+    async def _llm_dm_digest_action(self, *, ctx: dict[str, Any]) -> dict[str, Any]:
+        """
+        Ask the DM model to produce a single digest action JSON (no tool-calling).
+        """
+        if self._llm is None:
+            return {"type": "noop", "reason": "llm not configured"}
+        if not (self._settings.openai_base_url and self._settings.openai_api_key):
+            return {"type": "noop", "reason": "missing openai_base_url/api_key"}
+
+        model = self._engine.dm.model or self._settings.openai_dm_model or self._settings.openai_model
+        if not isinstance(model, str) or not model.strip():
+            return {"type": "noop", "reason": "missing model"}
+
+        dm_persona = (self._engine.dm.persona or "").strip() or "你是DM。"
+
+        messages = render_prompt_messages(
+            "tick_runner.dm_digest_action",
+            {
+                "dm_persona": dm_persona,
+                "pcs_json": json.dumps(ctx["pcs"], ensure_ascii=False),
+                "forum_channels_json": json.dumps(ctx["forum_channels"], ensure_ascii=False),
+                "direct_digest_json": json.dumps(ctx["direct_digest"], ensure_ascii=False),
+                "forum_digest_json": json.dumps(ctx["forum_digest"], ensure_ascii=False),
+                "broadcast_digest_json": json.dumps(ctx["broadcast_digest"], ensure_ascii=False),
+                "since_iso": str(ctx.get("since") or ""),
+                "until_iso": str(ctx.get("until") or ""),
+            },
+        )
+
+        url = openai_chat_completions_url(self._settings.openai_base_url)
+        res = await self._llm.chat(
+            url=url,
+            apikey=self._settings.openai_api_key,
+            model=model,
+            messages=messages,
+            tools=None,
+        )
+
+        parsed = res.get("parsed") if isinstance(res, dict) else None
+        if isinstance(parsed, dict) and parsed.get("kind") == "structured":
+            structured = parsed.get("structured")
+            if isinstance(structured, dict):
+                return structured
+            return {"type": "noop", "reason": "llm returned non-object structured output"}
+
+        if isinstance(parsed, dict) and parsed.get("kind") == "markdown":
+            md = parsed.get("markdown")
+            if isinstance(md, str):
+                j = self._try_parse_json_loose(md)
+                if isinstance(j, dict):
+                    return j
+                return {"type": "noop", "reason": "llm returned non-json markdown"}
+
+        raw = res.get("raw") if isinstance(res, dict) else None
+        p2 = parse_llm_response(raw)
+        if p2["kind"] == "structured" and isinstance(p2["structured"], dict):
+            return p2["structured"]
+        if p2["kind"] == "markdown" and isinstance(p2["markdown"], str):
+            j = self._try_parse_json_loose(p2["markdown"])
+            if isinstance(j, dict):
+                return j
+        return {"type": "noop", "reason": "llm output parse failed"}
+
+    @staticmethod
+    def _validate_dm_digest_action(raw: Any, *, pc_ids: set[str]) -> tuple[dict[str, Any], list[str]]:
+        def clean_str(v: Any) -> str | None:
+            if not isinstance(v, str):
+                return None
+            s = v.strip()
+            return s if s else None
+
+        if not isinstance(raw, dict):
+            return {"type": "noop", "reason": "invalid action: not an object"}, ["action must be an object"]
+
+        a_type = clean_str(raw.get("type"))
+        if not a_type:
+            return {"type": "noop", "reason": "invalid action: missing type"}, ["action.type is required"]
+
+        if a_type == "dm":
+            to_pc_id = clean_str(raw.get("to_pc_id"))
+            content = clean_str(raw.get("content"))
+            errors: list[str] = []
+            if not to_pc_id:
+                errors.append("dm.to_pc_id is required")
+            elif to_pc_id not in pc_ids:
+                errors.append("dm.to_pc_id must be an existing pc id")
+            if not content:
+                errors.append("dm.content is required")
+            elif len(content) > 400:
+                content = content[:400]
+            if errors:
+                return {"type": "noop", "reason": "invalid dm"}, errors
+            return {"type": "dm", "to_pc_id": to_pc_id, "content": content}, []
+
+        if a_type == "broadcast":
+            content = clean_str(raw.get("content"))
+            if not content:
+                return {"type": "noop", "reason": "invalid broadcast"}, ["broadcast.content is required"]
+            if len(content) > 1200:
+                content = content[:1200]
+            return {"type": "broadcast", "content": content}, []
+
+        if a_type == "noop":
+            reason = clean_str(raw.get("reason"))
+            out: dict[str, Any] = {"type": "noop"}
+            if reason:
+                out["reason"] = reason
+            return out, []
+
+        return {"type": "noop", "reason": f"invalid action: unknown type '{a_type}'"}, [f"unknown action.type: {a_type}"]
+
+    def _deterministic_dm_digest_action(self, *, ctx: dict[str, Any]) -> dict[str, Any]:
+        required_type = str(ctx.get("required_type") or "noop")
+        direct_digest = ctx.get("direct_digest") or {}
+        forum_digest = ctx.get("forum_digest") or {}
+        broadcast_digest = ctx.get("broadcast_digest") or {}
+
+        if required_type == "dm":
+            items = direct_digest.get("new") if isinstance(direct_digest, dict) else None
+            if isinstance(items, list) and items:
+                last = items[-1] if isinstance(items[-1], dict) else {}
+                to_pc_id = str(last.get("pc_id") or "").strip()
+                pc_name = str(last.get("pc_name") or "").strip() or "你"
+                preview = str(last.get("line") or "").strip()
+                if preview:
+                    preview = preview[:160] + ("…" if len(preview) > 160 else "")
+                content = f"收到。你刚才说的要点我记下了：{preview}\n你希望我怎么处理：1) 仅记录 2) 帮你转达 3) 我来推进？"
+                content = content[:400]
+                if to_pc_id:
+                    return {"type": "dm", "to_pc_id": to_pc_id, "content": f"{pc_name}，{content}"}
+            return {"type": "noop", "reason": "no direct message to reply"}
+
+        if required_type == "broadcast":
+            lines: list[str] = ["【DM Digest】"]
+            forum_new = int(forum_digest.get("new_count") or 0) if isinstance(forum_digest, dict) else 0
+            bc_new = int(broadcast_digest.get("new_count") or 0) if isinstance(broadcast_digest, dict) else 0
+            if forum_new:
+                lines.append(f"- 论坛新增：{forum_new} 条")
+                items = forum_digest.get("new_items") if isinstance(forum_digest, dict) else None
+                if isinstance(items, list):
+                    for it in items[-3:]:
+                        if not isinstance(it, dict):
+                            continue
+                        ch = str(it.get("channel_title") or it.get("channel_id") or "").strip()
+                        th = str(it.get("thread_title") or "").strip()
+                        line = str(it.get("line") or "").strip()
+                        if ch and th and line:
+                            lines.append(f"  - {ch}《{th}》：{line[:180]}{'…' if len(line) > 180 else ''}")
+            if bc_new:
+                lines.append(f"- #broadcast 新增：{bc_new} 条")
+                items2 = broadcast_digest.get("new_lines") if isinstance(broadcast_digest, dict) else None
+                if isinstance(items2, list):
+                    for l in items2[-3:]:
+                        if isinstance(l, str) and l.strip():
+                            s = l.strip()
+                            lines.append(f"  - {s[:220]}{'…' if len(s) > 220 else ''}")
+            if len(lines) == 1:
+                lines.append("- 暂无新增。")
+            content = "\n".join(lines)[:1200]
+            return {"type": "broadcast", "content": content}
+
+        return {"type": "noop", "reason": "no new items in digest window"}
+
+    def _coerce_dm_digest_action(self, *, action: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+        required_type = str(ctx.get("required_type") or "noop")
+        if not isinstance(action, dict) or action.get("type") != required_type:
+            return self._deterministic_dm_digest_action(ctx=ctx)
+        return action
+
+    async def _apply_dm_digest_action(self, *, action: dict[str, Any]) -> list[dict[str, Any]]:
+        a_type = action.get("type")
+        if a_type == "noop":
+            reason = str(action.get("reason") or "").strip()
+            summary = "DM：digest 无动作"
+            if reason:
+                summary = f"{summary}（{reason}）"
+            await self._store.add_pc_activity(
+                PcActivity(
+                    pc_id="dm",
+                    kind="digest_noop",
+                    summary=summary,
+                )
+            )
+            return [{"kind": "noop"}]
+
+        dm_actor = Actor(kind="dm", id="dm", name="DM")
+
+        if a_type == "broadcast":
+            content = str(action.get("content") or "")
+            msg = Message(
+                conversation_id="broadcast",
+                channel="broadcast",
+                from_actor=dm_actor,
+                to=[],
+                content=content,
+            )
+            await self._store.append_message(msg)
+            preview = content.strip().replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+            if len(preview) > 160:
+                preview = preview[:160] + "…"
+            await self._store.add_pc_activity(
+                PcActivity(
+                    pc_id="dm",
+                    kind="broadcast",
+                    summary=f"DM：在 #broadcast 发言（{preview}）" if preview else "DM：在 #broadcast 发言",
+                    ref_type="message",
+                    ref_id=msg.id,
+                )
+            )
+            await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
+            return [{"kind": "message", "message_id": msg.id}]
+
+        if a_type == "dm":
+            to_pc_id = str(action.get("to_pc_id") or "").strip()
+            content = str(action.get("content") or "")
+            pc = next((p for p in self._engine.pcs if p.id == to_pc_id), None)
+            if pc is None:
+                return [{"kind": "dm_failed"}]
+            msg = Message(
+                conversation_id=f"dm_to_{pc.id}",
+                channel="direct",
+                from_actor=dm_actor,
+                to=[Actor(kind="pc", id=pc.id, name=pc.name)],
+                content=content,
+            )
+            await self._store.append_message(msg)
+            preview = content.strip().replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+            if len(preview) > 160:
+                preview = preview[:160] + "…"
+            await self._store.add_pc_activity(
+                PcActivity(
+                    pc_id="dm",
+                    kind="dm",
+                    summary=f"DM：私信 {pc.name}（{preview}）" if preview else f"DM：私信 {pc.name}",
+                    ref_type="message",
+                    ref_id=msg.id,
+                )
+            )
+            await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
+            return [{"kind": "message", "message_id": msg.id}]
+
+        return [{"kind": "noop"}]
+
+    async def _run_dm_digest_if_due(self) -> None:
+        if self._dm_digest_s <= 0:
+            return
+        if self._engine.is_paused():
+            return
+
+        now_dt = datetime.now(timezone.utc)
+        until = now_dt.isoformat()
+
+        last = await self._store.get_latest_tick_started_at(pc_id="dm")
+        since: str
+        if last:
+            last_dt = self._parse_iso_utc_loose(last)
+            if last_dt is not None and (now_dt - last_dt).total_seconds() < self._dm_digest_s:
+                return
+            since = last
+        else:
+            since = (now_dt - timedelta(seconds=max(0.0, self._dm_bootstrap_lookback_s))).isoformat()
+
+        tick = TickRecord(pc_id="dm", status="running", action={"since": since, "until": until})
+        await self._store.upsert_tick(tick)
+        t0 = time.monotonic()
+        refs: list[dict[str, Any]] = []
+        try:
+            ctx = await self._build_dm_digest_context(since=since, until=until)
+            if ctx.get("required_type") == "noop":
+                raw_action: Any = {"type": "noop", "reason": "no new items in digest window"}
+            elif self._settings.demo_fake:
+                raw_action = self._deterministic_dm_digest_action(ctx=ctx)
+            else:
+                raw_action = await self._llm_dm_digest_action(ctx=ctx)
+            raw_for_validation: Any = raw_action
+            if isinstance(raw_action, dict) and isinstance(raw_action.get("action"), dict):
+                raw_for_validation = raw_action["action"]
+            action, errors = self._validate_dm_digest_action(raw_for_validation, pc_ids=set(ctx["pc_ids"]))
+            action = self._coerce_dm_digest_action(action=action, ctx=ctx)
+            tick.action = raw_action if isinstance(raw_action, dict) else {"_raw": str(raw_action)}
+            if errors:
+                tick.error = "; ".join(errors)
+            await self._store.upsert_tick(tick)
+            refs = await self._apply_dm_digest_action(action=action)
+        except Exception as exc:  # noqa: BLE001
+            tick.status = "failed"
+            tick.error = f"{type(exc).__name__}: {exc}"
+            tick.duration_ms = int((time.monotonic() - t0) * 1000)
+            await self._store.upsert_tick(tick)
+            raise
+        else:
+            tick.status = "done"
+            tick.result_refs = refs
+            tick.duration_ms = int((time.monotonic() - t0) * 1000)
+            await self._store.upsert_tick(tick)
 
     async def _deterministic_action(self, *, pc_id: str, turn_no: int) -> dict[str, Any]:
         """

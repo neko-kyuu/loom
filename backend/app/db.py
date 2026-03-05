@@ -225,6 +225,22 @@ class SqliteStore:
         msgs.reverse()
         return msgs
 
+    async def list_messages_since(self, conversation_id: str, *, since: str, limit: int = 200) -> list[Message]:
+        """
+        List messages in a conversation with timestamp >= since (ascending).
+        """
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT payload FROM messages WHERE conversation_id=? AND timestamp>=? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (conversation_id, since, limit),
+            )
+            rows = await cur.fetchall()
+        msgs = [Message.model_validate_json(r["payload"]) for r in rows]
+        msgs.reverse()
+        return msgs
+
     async def list_messages_by_thread(self, thread_id: str, limit: int = 200) -> list[Message]:
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
@@ -409,6 +425,21 @@ class SqliteStore:
                 ),
             )
             await db.commit()
+
+    async def get_latest_tick_started_at(self, *, pc_id: str) -> str | None:
+        """
+        Return the latest tick started_at for a given pc_id (newest started_at).
+        """
+        async with aiosqlite.connect(self._path) as db:
+            cur = await db.execute(
+                "SELECT started_at FROM ticks WHERE pc_id=? ORDER BY started_at DESC LIMIT 1",
+                (pc_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        started_at = row[0]
+        return started_at if isinstance(started_at, str) and started_at.strip() else None
 
     async def get_tick(self, tick_id: str) -> TickRecord | None:
         import json
