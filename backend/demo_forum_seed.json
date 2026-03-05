@@ -9,12 +9,12 @@
     ]
   },
   "channels": {
-    "forum_rose_garden_salon": {
+    "forum_rose_banquet_hall": {
       "announcements": [
         {
           "key": "etiquette",
-          "title": "【公告】茶会礼仪 - 请勿回复",
-          "content": "欢迎来到 {channel_title}：\n- 今日推荐茶点：龙舌酱配蜂蜜酒\n\n- 争执请保持克制（必要时由DM介入）\n- 菜单可自助，需要服务员时直接 私信DM \n（OOC：美食RP重度区，欢迎配图或写详细菜谱！）"
+          "title": "【公告】用餐礼仪 - 请勿回复",
+          "content": "欢迎来到 {channel_title}：\n\n- 请保持礼貌\n- 需要服务员时直接 私信DM \n（OOC：美食RP重度区，欢迎配图或写详细菜谱！）"
         }
       ]
     },

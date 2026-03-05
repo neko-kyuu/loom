@@ -62,16 +62,19 @@ async def _startup() -> None:
 
     if not isinstance(channels_state, dict):
         channels_state = {
-            "broadcast": {"description": "闲聊/广播频道（固定存在，不可删除）"},
+            "broadcast": {"description": "闲聊/广播频道（固定存在，不可删除）", "group": "欢迎"},
             "forums": [
                 {
-                    "id": "forum_rose_garden_salon", 
-                    "title": "# 🍽️ 玫瑰茶会花园", 
-                    "description": "贵族们的下午茶圣地，只为最尊贵的味蕾！在此尽情描写龙舌酱的鲜美、凤凰蛋挞的酥脆、百年酒窖的陈香……精灵贵族请优雅落座，人类贵族请别把茶洒在蕾丝上。"},
+                    "id": "forum_rose_banquet_hall", 
+                    "title": "# 🍽️ 玫瑰宴会长厅", 
+                    "description": "只为最尊贵的味蕾！精灵贵族请优雅落座，人类贵族请别把茶洒在蕾丝上。",
+                    "group": "美食专区",
+                },
                 {
                     "id": "forum_guilds_complex", 
                     "title": "# 🏛️ 城市公会建筑群", 
-                    "description": "米克斯塔的平民行政中心！调查员公会、制图师公会、炼金行会、商会及其各个子支……这个城市拥有相当先进的公会体制和制度。"
+                    "description": "米克斯塔的平民行政中心！调查员公会、制图师公会、炼金行会、商会及其各个子支……这个城市拥有相当先进的公会体制和制度。",
+                    "group": "rp专区",
                 },
             ]
         }
@@ -100,17 +103,33 @@ async def _startup() -> None:
                 t = f"#{t}"
             seen_forum_ids.add(cid_s)
             desc = item.get("description")
-            forum_channels.append(ForumChannel(id=cid_s, title=t, description=desc if isinstance(desc, str) else None))
+            grp = item.get("group")
+            forum_channels.append(
+                ForumChannel(
+                    id=cid_s,
+                    title=t,
+                    description=desc if isinstance(desc, str) else None,
+                    group=grp.strip() if isinstance(grp, str) and grp.strip() else None,
+                )
+            )
 
     broadcast_desc = None
+    broadcast_group = None
     b = channels_state.get("broadcast") if isinstance(channels_state, dict) else None
     if isinstance(b, dict):
         d = b.get("description")
         if isinstance(d, str):
             broadcast_desc = d
+        g = b.get("group")
+        if isinstance(g, str) and g.strip():
+            broadcast_group = g.strip()
 
     await store.sync_conversations(
-        engine.build_conversations(forum_channels=forum_channels, broadcast_description=broadcast_desc)
+        engine.build_conversations(
+            forum_channels=forum_channels,
+            broadcast_description=broadcast_desc,
+            broadcast_group=broadcast_group,
+        )
     )
 
     # demo seed: threads + posts for forum channels
@@ -190,6 +209,7 @@ async def put_profiles_state(payload: dict[str, Any] = Body(...)) -> dict[str, A
         channels_state = None
 
     broadcast_desc = None
+    broadcast_group = None
     forums_raw = None
     if isinstance(channels_state, dict):
         b = channels_state.get("broadcast")
@@ -197,6 +217,9 @@ async def put_profiles_state(payload: dict[str, Any] = Body(...)) -> dict[str, A
             d = b.get("description")
             if isinstance(d, str):
                 broadcast_desc = d
+            g = b.get("group")
+            if isinstance(g, str) and g.strip():
+                broadcast_group = g.strip()
         forums_raw = channels_state.get("forums")
 
     forum_channels: list[ForumChannel] = []
@@ -221,9 +244,23 @@ async def put_profiles_state(payload: dict[str, Any] = Body(...)) -> dict[str, A
             if not t.startswith("#"):
                 t = f"#{t}"
             desc = item.get("description")
-            forum_channels.append(ForumChannel(id=cid_s, title=t, description=desc if isinstance(desc, str) else None))
+            grp = item.get("group")
+            forum_channels.append(
+                ForumChannel(
+                    id=cid_s,
+                    title=t,
+                    description=desc if isinstance(desc, str) else None,
+                    group=grp.strip() if isinstance(grp, str) and grp.strip() else None,
+                )
+            )
 
-    await store.sync_conversations(engine.build_conversations(forum_channels=forum_channels, broadcast_description=broadcast_desc))
+    await store.sync_conversations(
+        engine.build_conversations(
+            forum_channels=forum_channels,
+            broadcast_description=broadcast_desc,
+            broadcast_group=broadcast_group,
+        )
+    )
     return {"ok": True}
 
 
@@ -235,6 +272,9 @@ async def put_channels_state(payload: dict[str, Any] = Body(...)) -> dict[str, A
         d = broadcast_in.get("description")
         if isinstance(d, str):
             broadcast_out["description"] = d
+        g = broadcast_in.get("group")
+        if isinstance(g, str) and g.strip():
+            broadcast_out["group"] = g.strip()
 
     forums_raw = payload.get("forums")
     forums_out: list[dict[str, str]] = []
@@ -252,6 +292,7 @@ async def put_channels_state(payload: dict[str, Any] = Body(...)) -> dict[str, A
             if not isinstance(title, str) or not title.strip():
                 continue
             desc = item.get("description")
+            grp = item.get("group")
             t = title.strip()
             if not t.startswith("#"):
                 t = f"#{t}"
@@ -264,8 +305,17 @@ async def put_channels_state(payload: dict[str, Any] = Body(...)) -> dict[str, A
             out = {"id": cid_s, "title": t}
             if isinstance(desc, str) and desc:
                 out["description"] = desc
+            if isinstance(grp, str) and grp.strip():
+                out["group"] = grp.strip()
             forums_out.append(out)
-            forum_channels.append(ForumChannel(id=cid_s, title=t, description=desc if isinstance(desc, str) else None))
+            forum_channels.append(
+                ForumChannel(
+                    id=cid_s,
+                    title=t,
+                    description=desc if isinstance(desc, str) else None,
+                    group=grp.strip() if isinstance(grp, str) and grp.strip() else None,
+                )
+            )
 
     state = {"broadcast": broadcast_out, "forums": forums_out}
     await store.set_setting_json("channels_state", json.dumps(state))
@@ -273,6 +323,7 @@ async def put_channels_state(payload: dict[str, Any] = Body(...)) -> dict[str, A
         engine.build_conversations(
             forum_channels=forum_channels,
             broadcast_description=broadcast_out.get("description") or None,
+            broadcast_group=broadcast_out.get("group") or None,
         )
     )
     return {"ok": True}

@@ -9,6 +9,7 @@ export type Conversation = {
   kind: "broadcast" | "dm_to_pc" | "pc_to_pc" | "forum";
   title: string;
   description?: string | null;
+  group?: string | null;
   participants: Actor[];
 };
 

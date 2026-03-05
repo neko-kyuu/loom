@@ -302,7 +302,7 @@ class TickRunner:
             thread_msgs = await self._store.list_messages_by_thread(thread_id, limit=80)
             td["thread_posts"] = [self._summarize_message(m, max_len=1200) for m in thread_msgs[-8:]]
 
-        forum_channels = [{"id": c.id, "title": c.title, "description": c.description} for c in forum_convs]
+        forum_channels = [{"id": c.id, "title": c.title, "description": c.description, "group": c.group} for c in forum_convs]
 
         persona_text = (persona or "").strip() or f"你是{pc_name}。"
 
@@ -402,7 +402,7 @@ class TickRunner:
         # forum: thread digests + new posts since window
         convs = await self._store.list_conversations()
         forum_convs = [c for c in convs if c.kind == "forum"]
-        forum_channels = [{"id": c.id, "title": c.title, "description": c.description} for c in forum_convs]
+        forum_channels = [{"id": c.id, "title": c.title, "description": c.description, "group": c.group} for c in forum_convs]
         channel_title_by_id = {c["id"]: c["title"] for c in forum_channels}
 
         threads_all: list[ForumThread] = []

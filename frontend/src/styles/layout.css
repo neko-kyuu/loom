@@ -94,6 +94,18 @@ html[data-theme="custom"] .dot {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.groupSubTitle {
+  padding: 8px 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  opacity: 0.9;
+}
+
+.convSubGroup + .convSubGroup {
+  margin-top: 6px;
+}
+
 html[data-theme="light"] .groupTitle,
 html[data-theme="gray"] .groupTitle,
 html[data-theme="milktea"] .groupTitle {

@@ -25,6 +25,7 @@ class Conversation(BaseModel):
     kind: Literal["broadcast", "dm_to_pc", "pc_to_pc", "forum"]
     title: str
     description: str | None = None
+    group: str | None = None
     participants: list[Actor]
 
 

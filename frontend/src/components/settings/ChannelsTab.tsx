@@ -1,6 +1,13 @@
 import { Plus, Trash2, X } from "lucide-react";
 import type { ChannelsState } from "../../lib/channels";
-import { newForumChannelId, updateBroadcastDescription, updateForumChannelDescription, updateForumChannelTitle } from "../../lib/channels";
+import {
+  newForumChannelId,
+  updateBroadcastDescription,
+  updateBroadcastGroup,
+  updateForumChannelDescription,
+  updateForumChannelGroup,
+  updateForumChannelTitle
+} from "../../lib/channels";
 
 export default function ChannelsTab(props: {
   open: boolean;
@@ -24,6 +31,17 @@ export default function ChannelsTab(props: {
             <strong>#broadcast</strong> 为闲聊/广播频道：固定存在、不可删除。
           </div>
         </div>
+        <label className="channelsDescBlock">
+          <div className="channelsDescLabel">分组（可选，用于侧边栏聚合）</div>
+          <input
+            className="customInput"
+            value={props.channels.broadcast.group || ""}
+            placeholder="例如：rp专区"
+            onChange={(e) => {
+              props.setChannels((prev) => updateBroadcastGroup(prev, e.target.value));
+            }}
+          />
+        </label>
         <label className="channelsDescBlock">
           <div className="channelsDescLabel">描述（给 DM 用，不在聊天界面显示）</div>
           <textarea
@@ -57,6 +75,15 @@ export default function ChannelsTab(props: {
               <div key={c.id} className="channelsRow">
                 <div className="channelsId">{c.id}</div>
                 <div className="channelsFields">
+                  <input
+                    className="customInput"
+                    value={c.group || ""}
+                    placeholder="分组（可选）例如：美食专区"
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      props.setChannels((prev) => updateForumChannelGroup(prev, c.id, v));
+                    }}
+                  />
                   <input
                     className="customInput"
                     value={c.title}

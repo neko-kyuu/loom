@@ -285,6 +285,31 @@ export default function App() {
 
   const channelConversations = useMemo(() => conversations.filter((c) => c.kind === "broadcast" || c.kind === "forum"), [conversations]);
   const directConversations = useMemo(() => conversations.filter((c) => c.kind !== "broadcast" && c.kind !== "forum"), [conversations]);
+  const channelConversationGroups = useMemo(() => {
+    const defaultGroup = "未分组";
+    const byGroup = new Map<string, Conversation[]>();
+    for (const c of channelConversations) {
+      const g = (c.group || "").trim();
+      const key = g || defaultGroup;
+      const list = byGroup.get(key);
+      if (list) list.push(c);
+      else byGroup.set(key, [c]);
+    }
+    const locale = "zh-Hans-CN";
+    const collator = new Intl.Collator(locale, { numeric: true, sensitivity: "base" });
+    const sortConv = (a: Conversation, b: Conversation) => {
+      if (a.kind !== b.kind) return a.kind === "broadcast" ? -1 : 1;
+      return collator.compare(conversationLabel(a, profiles), conversationLabel(b, profiles));
+    };
+    for (const list of byGroup.values()) list.sort(sortConv);
+    const entries = [...byGroup.entries()];
+    entries.sort(([ga], [gb]) => {
+      if (ga === defaultGroup && gb !== defaultGroup) return -1;
+      if (gb === defaultGroup && ga !== defaultGroup) return 1;
+      return collator.compare(ga, gb);
+    });
+    return entries.map(([group, list]) => ({ group, conversations: list }));
+  }, [channelConversations, profiles]);
 
   function jumpToDm(pcId: string, sendBatchId: string) {
     const convId = `dm_to_${pcId}`;
@@ -825,17 +850,22 @@ export default function App() {
         <div className="convList" role="list">
           <div className="convGroup">
             <div className="groupTitle">频道</div>
-            {channelConversations.map((c) => (
-              <button
-                key={c.id}
-                className={`convItem ${c.id === activeConvId ? "active" : ""}`}
-                onClick={() => setActiveConvId(c.id)}
-              >
-                <span className="convItemIcon" aria-hidden="true">
-                  {conversationIcon(c)}
-                </span>
-                <span className="convItemLabel">{conversationLabel(c, profiles)}</span>
-              </button>
+            {channelConversationGroups.map((g) => (
+              <div key={g.group} className="convSubGroup">
+                <div className="groupSubTitle">{g.group}</div>
+                {g.conversations.map((c) => (
+                  <button
+                    key={c.id}
+                    className={`convItem ${c.id === activeConvId ? "active" : ""}`}
+                    onClick={() => setActiveConvId(c.id)}
+                  >
+                    <span className="convItemIcon" aria-hidden="true">
+                      {conversationIcon(c)}
+                    </span>
+                    <span className="convItemLabel">{conversationLabel(c, profiles)}</span>
+                  </button>
+                ))}
+              </div>
             ))}
           </div>
           <div className="convGroup">

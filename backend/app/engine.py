@@ -37,6 +37,7 @@ class ForumChannel:
     id: str
     title: str
     description: str | None = None
+    group: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,12 +150,19 @@ class DemoEngine:
                 pc.name = new_name
         self._apply_llm_profiles()
 
-    def build_conversations(self, *, forum_channels: list[ForumChannel], broadcast_description: str | None = None) -> list[Conversation]:
+    def build_conversations(
+        self,
+        *,
+        forum_channels: list[ForumChannel],
+        broadcast_description: str | None = None,
+        broadcast_group: str | None = None,
+    ) -> list[Conversation]:
         broadcast = Conversation(
             id="broadcast",
             kind="broadcast",
             title="#broadcast",
             description=broadcast_description,
+            group=broadcast_group,
             participants=[Actor(kind="dm", id="dm", name="DM")]
             + [Actor(kind="pc", id=p.id, name=p.name) for p in self.pcs],
         )
@@ -164,6 +172,7 @@ class DemoEngine:
                 kind="forum",
                 title=ch.title,
                 description=ch.description,
+                group=ch.group,
                 participants=[Actor(kind="dm", id="dm", name="DM")]
                 + [Actor(kind="pc", id=p.id, name=p.name) for p in self.pcs],
             )

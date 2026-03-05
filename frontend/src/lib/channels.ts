@@ -2,10 +2,11 @@ export type ForumChannelConfig = {
   id: string;
   title: string; // "#trade"
   description: string;
+  group?: string;
 };
 
 export type ChannelsState = {
-  broadcast: { description: string };
+  broadcast: { description: string; group?: string };
   forums: ForumChannelConfig[];
 };
 
@@ -21,14 +22,22 @@ function normalizeTitle(title: string) {
   return t.startsWith("#") ? t : `#${t}`;
 }
 
+function normalizeGroup(group: string) {
+  return group.trim();
+}
+
 export function parseChannelsStatePayload(raw: any): ChannelsState | null {
   if (!raw || typeof raw !== "object") return null;
   const arr = Array.isArray(raw.forums) ? raw.forums : [];
   const broadcastRaw = (raw as any).broadcast;
+  const broadcastGroup = broadcastRaw && typeof broadcastRaw === "object" ? normalizeGroup(safeString((broadcastRaw as any).group, "")) : "";
   const broadcast =
     broadcastRaw && typeof broadcastRaw === "object"
-      ? { description: safeString((broadcastRaw as any).description, "") }
-      : { description: "" };
+      ? {
+          description: safeString((broadcastRaw as any).description, ""),
+          group: broadcastGroup || undefined,
+        }
+      : { description: "", group: undefined };
   const seen = new Set<string>();
   const forums: ForumChannelConfig[] = [];
   for (const item of arr) {
@@ -36,10 +45,11 @@ export function parseChannelsStatePayload(raw: any): ChannelsState | null {
     const id = safeString((item as any).id, "").trim();
     const title = normalizeTitle(safeString((item as any).title, ""));
     const description = safeString((item as any).description, "");
+    const group = normalizeGroup(safeString((item as any).group, ""));
     if (!id || !title) continue;
     if (seen.has(id)) continue;
     seen.add(id);
-    forums.push({ id, title, description });
+    forums.push({ id, title, description, group: group || undefined });
   }
   return { broadcast, forums };
 }
@@ -85,6 +95,19 @@ export function updateForumChannelDescription(state: ChannelsState, id: string, 
   };
 }
 
+export function updateForumChannelGroup(state: ChannelsState, id: string, nextGroup: string): ChannelsState {
+  const group = normalizeGroup(nextGroup);
+  return {
+    broadcast: state.broadcast,
+    forums: state.forums.map((c) => (c.id === id ? { ...c, group: group || undefined } : c))
+  };
+}
+
 export function updateBroadcastDescription(state: ChannelsState, nextDescription: string): ChannelsState {
-  return { broadcast: { description: nextDescription }, forums: state.forums };
+  return { broadcast: { ...state.broadcast, description: nextDescription }, forums: state.forums };
+}
+
+export function updateBroadcastGroup(state: ChannelsState, nextGroup: string): ChannelsState {
+  const group = normalizeGroup(nextGroup);
+  return { broadcast: { ...state.broadcast, group: group || undefined }, forums: state.forums };
 }
