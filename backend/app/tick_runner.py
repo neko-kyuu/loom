@@ -239,63 +239,6 @@ class TickRunner:
         s = v.strip()
         return s if s else None
 
-    @staticmethod
-    def _trim_text(text: str, *, max_len: int) -> str:
-        s = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-        if len(s) > max_len:
-            return s[:max_len] + "…"
-        return s
-
-    async def _build_thread_context_round15(
-        self,
-        *,
-        channel_id: str,
-        thread: ForumThread,
-        recent_n: int = 12,
-        max_chars_per_post: int = 1200,
-        op_max_chars: int = 1600,
-    ) -> dict[str, Any]:
-        """
-        Round 1.5: fetch thread context for the selected forum thread.
-
-        Returned payload is bounded in size (per-post char caps) to keep token usage predictable.
-        """
-        op = await self._store.get_first_message_by_thread_in_conversation(
-            thread_id=thread.id,
-            conversation_id=channel_id,
-        )
-        recent = await self._store.list_messages_by_thread_in_conversation(
-            thread_id=thread.id,
-            conversation_id=channel_id,
-            limit=max(60, recent_n + 10),
-        )
-        if op is not None:
-            recent = [m for m in recent if m.id != op.id]
-        tail = recent[-max(0, int(recent_n)) :]
-
-        def pack(m: Message, *, max_len: int) -> dict[str, Any]:
-            return {
-                "id": m.id,
-                "timestamp": m.timestamp,
-                "from": (m.from_actor.name or m.from_actor.kind),
-                "content": self._trim_text(m.content, max_len=max_len),
-            }
-
-        out: dict[str, Any] = {
-            "thread": {
-                "thread_id": thread.id,
-                "channel_id": thread.channel_id,
-                "title": thread.title,
-                "reply_count": thread.reply_count,
-                "last_activity_at": thread.last_activity_at,
-                "pinned": thread.pinned,
-                "locked": thread.locked,
-            },
-            "op_post": pack(op, max_len=op_max_chars) if op is not None else None,
-            "recent_posts": [pack(m, max_len=max_chars_per_post) for m in tail],
-        }
-        return out
-
     async def _run_reply_write_round2(
         self,
         *,
@@ -424,7 +367,13 @@ class TickRunner:
                 ref_id=thread.id,
             )
         )
-        thread_ctx = await self._build_thread_context_round15(channel_id=channel_id, thread=thread)
+        thread_ctx = await self._store.get_thread_context(
+            thread_id=thread.id,
+            channel_id=channel_id,
+            recent_n=12,
+            max_chars_per_post=1200,
+            op_max_chars=1600,
+        )
         return [
             {
                 "kind": "reply_select",

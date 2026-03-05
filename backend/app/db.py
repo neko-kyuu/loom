@@ -293,6 +293,67 @@ class SqliteStore:
             return None
         return Message.model_validate_json(row["payload"])
 
+    async def get_thread_context(
+        self,
+        *,
+        thread_id: str,
+        channel_id: str,
+        recent_n: int = 12,
+        max_chars_per_post: int = 1200,
+        op_max_chars: int = 1600,
+    ) -> dict[str, object]:
+        """
+        Fetch a compact forum thread context for LLM prompting.
+
+        - Filters to public posts in the given forum channel (conversation_id == channel_id).
+        - Returns bounded per-post content to keep token usage predictable.
+        """
+
+        def trim_text(text: str, *, max_len: int) -> str:
+            s = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+            if len(s) > max_len:
+                return s[:max_len] + "…"
+            return s
+
+        thread = await self.get_forum_thread(thread_id)
+        if thread is None or thread.channel_id != channel_id:
+            raise ValueError("thread not found or does not belong to channel")
+
+        op = await self.get_first_message_by_thread_in_conversation(
+            thread_id=thread.id,
+            conversation_id=channel_id,
+        )
+        recent = await self.list_messages_by_thread_in_conversation(
+            thread_id=thread.id,
+            conversation_id=channel_id,
+            limit=max(60, int(recent_n) + 10),
+        )
+        if op is not None:
+            recent = [m for m in recent if m.id != op.id]
+        tail = recent[-max(0, int(recent_n)) :]
+
+        def pack(m: Message, *, max_len: int) -> dict[str, object]:
+            return {
+                "id": m.id,
+                "timestamp": m.timestamp,
+                "from": (m.from_actor.name or m.from_actor.kind),
+                "content": trim_text(m.content, max_len=max_len),
+            }
+
+        return {
+            "thread": {
+                "thread_id": thread.id,
+                "channel_id": thread.channel_id,
+                "title": thread.title,
+                "reply_count": thread.reply_count,
+                "last_activity_at": thread.last_activity_at,
+                "pinned": thread.pinned,
+                "locked": thread.locked,
+            },
+            "op_post": pack(op, max_len=op_max_chars) if op is not None else None,
+            "recent_posts": [pack(m, max_len=max_chars_per_post) for m in tail],
+        }
+
     async def count_messages_by_thread_in_conversation(self, *, thread_id: str, conversation_id: str) -> int:
         async with aiosqlite.connect(self._path) as db:
             cur = await db.execute(
