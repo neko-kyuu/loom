@@ -36,8 +36,40 @@ html[data-theme="milktea"] .activityOverlay {
   gap: 10px;
 }
 
+.activityHeaderLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
 .activityTitle {
   font-weight: 900;
+}
+
+.activityTabs {
+  display: flex;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.activityTab {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.activityTab.active {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
 }
 
 .activityBody {
@@ -47,6 +79,10 @@ html[data-theme="milktea"] .activityOverlay {
   flex-direction: column;
   gap: 10px;
   min-height: 0;
+}
+
+.activityBody.llmMode {
+  overflow: hidden;
 }
 
 .activityList {
@@ -92,3 +128,236 @@ html[data-theme="milktea"] .activityOverlay {
   font-size: 12px;
 }
 
+.llmShell {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 6px;
+  min-height: 0;
+  flex: 1;
+}
+
+.llmList {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+}
+
+.llmListHead {
+  padding: 10px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.llmListTitle {
+  font-weight: 900;
+  font-size: 12px;
+}
+
+.llmListInner {
+  overflow: auto;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+}
+
+.llmRow {
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.llmRow.active {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.llmRowTop,
+.llmRowSub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.llmTime {
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.llmStatus {
+  font-size: 11px;
+  font-weight: 900;
+  color: var(--muted);
+}
+
+.llmStatus.err {
+  color: #ff8b8b;
+}
+
+.llmRowSub {
+  margin-top: 4px;
+}
+
+.llmModel,
+.llmDur {
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.9;
+  white-space: nowrap;
+}
+
+.llmModel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.llmDur {
+  color: var(--muted);
+}
+
+.llmDetail {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.llmDetailHead {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.llmDetailTitle {
+  font-weight: 900;
+  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llmDetailMeta {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.llmErr {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #ff8b8b;
+}
+
+.llmBlocks {
+  overflow: auto;
+  padding: 10px 6px;
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+}
+
+.llmBlockTitle {
+  font-weight: 900;
+  font-size: 12px;
+  color: var(--muted);
+  padding-left: 12px;
+  margin-bottom: 12px;
+}
+
+.mdRoot {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.mdPara {
+  margin: 0 0 10px;
+}
+
+.mdHeading {
+  font-weight: 900;
+  margin: 8px 0 6px;
+}
+
+.mdH1 {
+  font-size: 14px;
+}
+
+.mdH2 {
+  font-size: 13px;
+}
+
+.mdH3 {
+  font-size: 12px;
+}
+
+.mdList {
+  margin: 0 0 10px;
+  padding-left: 18px;
+}
+
+.mdInlineCode {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.95em;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 1px 5px;
+  border-radius: 8px;
+}
+
+.mdRoot.requestRoot{
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--panel);
+  overflow-x: hidden;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.mdCode {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--panel);
+  overflow-x: hidden;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.mdCode code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  white-space: inherit;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  .llmShell {
+    grid-template-columns: 1fr;
+  }
+}

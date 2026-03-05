@@ -90,3 +90,17 @@ export type PcActivityLogPage = {
   items: PcActivityLogItem[];
   next_cursor: string | null;
 };
+
+export type LlmLogMeta = {
+  id: string;
+  created_at: string;
+  model?: string | null;
+  status_code?: number | null;
+  error?: string | null;
+  duration_ms?: number | null;
+};
+
+export type LlmLogItem = LlmLogMeta & {
+  request_json: string;
+  response_json?: string | null;
+};

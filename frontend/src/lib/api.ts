@@ -1,4 +1,4 @@
-import type { ForumThread, PcActivityLogPage } from "../types";
+import type { ForumThread, LlmLogItem, LlmLogMeta, PcActivityLogPage } from "../types";
 
 const DEFAULT_HTTP_BASE = "http://localhost:8080";
 
@@ -70,6 +70,17 @@ export async function getPcActivityLogs(opts?: {
   if (opts?.limit) q.set("limit", String(opts.limit));
   const qs = q.toString();
   return await jsonFetch(`${httpBase()}/api/pc-activity/logs${qs ? `?${qs}` : ""}`);
+}
+
+export async function getLlmLogs(opts?: { limit?: number }): Promise<{ items: LlmLogMeta[] }> {
+  const q = new URLSearchParams();
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return await jsonFetch(`${httpBase()}/api/llm-logs${qs ? `?${qs}` : ""}`);
+}
+
+export async function getLlmLog(logId: string): Promise<{ item: LlmLogItem }> {
+  return await jsonFetch(`${httpBase()}/api/llm-logs/${encodeURIComponent(logId)}`);
 }
 
 export function absoluteAssetUrl(pathOrUrl: string) {

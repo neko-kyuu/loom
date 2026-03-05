@@ -611,8 +611,30 @@ class SqliteStore:
                 "INSERT INTO llm_logs(id, created_at, model, request_json, response_json, status_code, error, duration_ms) "
                 "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
                 (log_id, created_at, model, request_json, response_json, status_code, error, duration_ms),
-            )
+                )
             await db.commit()
+
+    async def list_llm_logs_meta(self, *, limit: int = 200) -> list[dict]:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, created_at, model, status_code, error, duration_ms "
+                "FROM llm_logs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_llm_log(self, log_id: str) -> dict | None:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, created_at, model, request_json, response_json, status_code, error, duration_ms "
+                "FROM llm_logs WHERE id=?",
+                (log_id,),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
 
     async def list_llm_logs(self, limit: int = 200) -> list[dict]:
         async with aiosqlite.connect(self._path) as db:

@@ -423,6 +423,20 @@ async def get_pc_activity_logs(
     return {"items": items, "next_cursor": next_cursor}
 
 
+@app.get("/api/llm-logs")
+async def get_llm_logs(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+    items = await store.list_llm_logs_meta(limit=limit)
+    return {"items": items}
+
+
+@app.get("/api/llm-logs/{log_id}")
+async def get_llm_log(log_id: str) -> dict[str, Any]:
+    item = await store.get_llm_log(log_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="not found")
+    return {"item": item}
+
+
 async def _send_state(websocket: WebSocket) -> None:
     await websocket.send_json(await build_state_message(store=store))
 
