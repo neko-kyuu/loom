@@ -254,6 +254,45 @@ class SqliteStore:
         msgs.reverse()
         return msgs
 
+    async def list_messages_by_thread_in_conversation(
+        self, *, thread_id: str, conversation_id: str, limit: int = 200
+    ) -> list[Message]:
+        """
+        List messages in a specific (conversation_id, thread_id) pair (ascending).
+
+        This is useful because `thread_id` can appear across different conversations (e.g. DM copies),
+        but forum thread context should only include the public posts in its forum channel.
+        """
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT payload FROM messages WHERE conversation_id=? AND thread_id=? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (conversation_id, thread_id, limit),
+            )
+            rows = await cur.fetchall()
+        msgs = [Message.model_validate_json(r["payload"]) for r in rows]
+        msgs.reverse()
+        return msgs
+
+    async def get_first_message_by_thread_in_conversation(
+        self, *, thread_id: str, conversation_id: str
+    ) -> Message | None:
+        """
+        Fetch the earliest message in a specific (conversation_id, thread_id) pair.
+        """
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT payload FROM messages WHERE conversation_id=? AND thread_id=? "
+                "ORDER BY timestamp ASC LIMIT 1",
+                (conversation_id, thread_id),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return Message.model_validate_json(row["payload"])
+
     async def count_messages_by_thread_in_conversation(self, *, thread_id: str, conversation_id: str) -> int:
         async with aiosqlite.connect(self._path) as db:
             cur = await db.execute(

@@ -149,12 +149,47 @@ class TickRunner:
                 if isinstance(raw_action, dict) and isinstance(raw_action.get("action"), dict):
                     raw_for_validation = raw_action["action"]
                 ctx = await self._build_action_context()
-                action, errors = validate_action(raw_for_validation, ctx=ctx)
                 tick.action = raw_action if isinstance(raw_action, dict) else {"_raw": str(raw_action)}
-                if errors:
-                    tick.error = "; ".join(errors)
-                await self._store.upsert_tick(tick)
-                refs = await self._apply_action(pc_id=pc.id, action=action)
+
+                if isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "reply_select":
+                    refs, errors = await self._apply_reply_select_round1(
+                        pc_id=pc.id,
+                        pc_name=pc.name,
+                        raw=raw_for_validation,
+                        ctx=ctx,
+                    )
+                    if errors:
+                        tick.error = "; ".join(errors)
+                        await self._store.upsert_tick(tick)
+                        refs = await self._apply_action(
+                            pc_id=pc.id,
+                            action=NoopAction(type="noop", reason="invalid reply_select"),
+                        )
+                    else:
+                        round2_refs, round2_errors = await self._run_reply_write_round2(
+                            pc_id=pc.id,
+                            pc_name=pc.name,
+                            persona=pc.persona,
+                            refs=refs,
+                            ctx=ctx,
+                        )
+                        refs.extend(round2_refs)
+                        if round2_errors:
+                            tick.error = "; ".join(round2_errors)
+                        await self._store.upsert_tick(tick)
+                elif isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "reply":
+                    tick.error = "reply is not allowed in round 1; use reply_select"
+                    await self._store.upsert_tick(tick)
+                    refs = await self._apply_action(
+                        pc_id=pc.id,
+                        action=NoopAction(type="noop", reason="reply not allowed in round 1"),
+                    )
+                else:
+                    action, errors = validate_action(raw_for_validation, ctx=ctx)
+                    if errors:
+                        tick.error = "; ".join(errors)
+                    await self._store.upsert_tick(tick)
+                    refs = await self._apply_action(pc_id=pc.id, action=action)
             except Exception as exc:  # noqa: BLE001
                 tick.status = "failed"
                 tick.error = f"{type(exc).__name__}: {exc}"
@@ -196,6 +231,277 @@ class TickRunner:
             pc_ids=pc_ids,
             thread_channel_by_id=thread_channel_by_id,
         )
+
+    @staticmethod
+    def _clean_str(v: Any) -> str | None:
+        if not isinstance(v, str):
+            return None
+        s = v.strip()
+        return s if s else None
+
+    @staticmethod
+    def _trim_text(text: str, *, max_len: int) -> str:
+        s = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if len(s) > max_len:
+            return s[:max_len] + "…"
+        return s
+
+    async def _build_thread_context_round15(
+        self,
+        *,
+        channel_id: str,
+        thread: ForumThread,
+        recent_n: int = 12,
+        max_chars_per_post: int = 1200,
+        op_max_chars: int = 1600,
+    ) -> dict[str, Any]:
+        """
+        Round 1.5: fetch thread context for the selected forum thread.
+
+        Returned payload is bounded in size (per-post char caps) to keep token usage predictable.
+        """
+        op = await self._store.get_first_message_by_thread_in_conversation(
+            thread_id=thread.id,
+            conversation_id=channel_id,
+        )
+        recent = await self._store.list_messages_by_thread_in_conversation(
+            thread_id=thread.id,
+            conversation_id=channel_id,
+            limit=max(60, recent_n + 10),
+        )
+        if op is not None:
+            recent = [m for m in recent if m.id != op.id]
+        tail = recent[-max(0, int(recent_n)) :]
+
+        def pack(m: Message, *, max_len: int) -> dict[str, Any]:
+            return {
+                "id": m.id,
+                "timestamp": m.timestamp,
+                "from": (m.from_actor.name or m.from_actor.kind),
+                "content": self._trim_text(m.content, max_len=max_len),
+            }
+
+        out: dict[str, Any] = {
+            "thread": {
+                "thread_id": thread.id,
+                "channel_id": thread.channel_id,
+                "title": thread.title,
+                "reply_count": thread.reply_count,
+                "last_activity_at": thread.last_activity_at,
+                "pinned": thread.pinned,
+                "locked": thread.locked,
+            },
+            "op_post": pack(op, max_len=op_max_chars) if op is not None else None,
+            "recent_posts": [pack(m, max_len=max_chars_per_post) for m in tail],
+        }
+        return out
+
+    async def _run_reply_write_round2(
+        self,
+        *,
+        pc_id: str,
+        pc_name: str,
+        persona: str | None,
+        refs: list[dict[str, Any]],
+        ctx: ActionValidationContext,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """
+        Round 2: if Round 1 produced a `reply_select` with `thread_context`, ask the model to write the reply
+        and then apply it as a normal `ReplyAction`.
+        """
+        sel = next((r for r in refs if isinstance(r, dict) and r.get("kind") == "reply_select"), None)
+        if not isinstance(sel, dict):
+            return [], []
+        channel_id = self._clean_str(sel.get("channel_id"))
+        thread_id = self._clean_str(sel.get("thread_id"))
+        thread_context = sel.get("thread_context")
+        if not channel_id or not thread_id or not isinstance(thread_context, dict):
+            return [], ["reply_write missing selection context"]
+
+        # If the thread got locked between round 1 and now, abort safely.
+        thread = await self._store.get_forum_thread(thread_id)
+        if thread is None or thread.channel_id != channel_id:
+            return [], ["reply_write selected thread not found"]
+        if thread.locked:
+            await self._store.add_pc_activity(
+                PcActivity(
+                    pc_id=pc_id,
+                    kind="reply_blocked",
+                    summary=f"{pc_name}：准备回复但 thread《{thread.title}》已锁定（已跳过）",
+                    ref_type="thread",
+                    ref_id=thread.id,
+                )
+            )
+            return [{"kind": "reply_blocked", "thread_id": thread.id}], []
+
+        if self._settings.demo_fake:
+            now = utc_now_iso()
+            raw: dict[str, Any] = {
+                "type": "reply",
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "content": f"【自动行动】我先跟一句（{now[:19]}）。",
+            }
+        else:
+            raw = await self._llm_reply_write_action(
+                pc_id=pc_id,
+                pc_name=pc_name,
+                persona=persona,
+                selected_thread=dict(thread_context.get("thread") or {}),
+                thread_context=thread_context,
+            )
+
+        action, errors = validate_action(raw, ctx=ctx)
+        # Enforce that we only reply to the selected thread in round 2.
+        if isinstance(action, ReplyAction) and (action.channel_id != channel_id or action.thread_id != thread_id):
+            errors = [*errors, "reply_write must reply to the selected thread_id/channel_id"]
+            action = NoopAction(type="noop", reason="reply_write mismatch selection")
+
+        applied = await self._apply_action(pc_id=pc_id, action=action)
+        return applied, errors
+
+    async def _apply_reply_select_round1(
+        self,
+        *,
+        pc_id: str,
+        pc_name: str,
+        raw: dict[str, Any],
+        ctx: ActionValidationContext,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """
+        Round 1 only: accept a `reply_select` intermediate output.
+
+        - Valid selection is recorded to pc_activity for recall/debugging.
+        - No forum message is posted in Round 1.
+        """
+        errors: list[str] = []
+
+        channel_id = self._clean_str(raw.get("channel_id"))
+        thread_id = self._clean_str(raw.get("thread_id"))
+        selection_reason = self._clean_str(raw.get("selection_reason"))
+        if selection_reason and len(selection_reason) > 120:
+            selection_reason = selection_reason[:120] + "…"
+
+        if not channel_id:
+            errors.append("reply_select.channel_id is required")
+        elif channel_id not in ctx.forum_channel_ids:
+            errors.append("reply_select.channel_id must be an existing forum channel id")
+
+        if not thread_id:
+            errors.append("reply_select.thread_id is required")
+        else:
+            ch = ctx.thread_channel_by_id.get(thread_id)
+            if not ch:
+                errors.append("reply_select.thread_id must be an existing thread id")
+            elif channel_id and ch != channel_id:
+                errors.append("reply_select.thread_id must belong to reply_select.channel_id")
+
+        if errors:
+            return [], errors
+
+        thread = await self._store.get_forum_thread(thread_id)
+        if thread is None or thread.channel_id != channel_id:
+            return [], ["reply_select.thread_id must belong to reply_select.channel_id"]
+        if thread.locked:
+            await self._store.add_pc_activity(
+                PcActivity(
+                    pc_id=pc_id,
+                    kind="reply_select_blocked",
+                    summary=f"{pc_name}：选择回复已锁定 thread《{thread.title}》（已跳过）",
+                    ref_type="thread",
+                    ref_id=thread.id,
+                )
+            )
+            return [{"kind": "reply_select_blocked", "thread_id": thread.id}], []
+
+        reason_part = f"（{selection_reason}）" if selection_reason else ""
+        await self._store.add_pc_activity(
+            PcActivity(
+                pc_id=pc_id,
+                kind="reply_selected",
+                summary=f"{pc_name}：选择回复 thread《{thread.title}》{reason_part}（等待展开上下文）",
+                ref_type="thread",
+                ref_id=thread.id,
+            )
+        )
+        thread_ctx = await self._build_thread_context_round15(channel_id=channel_id, thread=thread)
+        return [
+            {
+                "kind": "reply_select",
+                "channel_id": channel_id,
+                "thread_id": thread.id,
+                "thread_context": thread_ctx,
+            }
+        ], []
+
+    async def _llm_reply_write_action(
+        self,
+        *,
+        pc_id: str,
+        pc_name: str,
+        persona: str | None,
+        selected_thread: dict[str, Any],
+        thread_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Ask the LLM to write the reply content for the selected thread (JSON-only).
+        """
+        if self._llm is None:
+            return {"type": "noop", "reason": "llm not configured"}
+        if not (self._settings.openai_base_url and self._settings.openai_api_key):
+            return {"type": "noop", "reason": "missing openai_base_url/api_key"}
+
+        persona_text = (persona or "").strip() or f"你是{pc_name}。"
+        messages = render_prompt_messages(
+            "tick_runner.reply_write",
+            {
+                "pc_id": pc_id,
+                "pc_name": pc_name,
+                "persona": persona_text,
+                "selected_thread_json": json.dumps(selected_thread, ensure_ascii=False),
+                "thread_context_json": json.dumps(thread_context, ensure_ascii=False),
+            },
+        )
+
+        model = getattr(next((p for p in self._engine.pcs if p.id == pc_id), None), "model", None)
+        if not isinstance(model, str) or not model.strip():
+            model = self._settings.openai_model
+        if not isinstance(model, str) or not model.strip():
+            return {"type": "noop", "reason": "missing model"}
+
+        url = openai_chat_completions_url(self._settings.openai_base_url)
+        res = await self._llm.chat(
+            url=url,
+            apikey=self._settings.openai_api_key,
+            model=model,
+            messages=messages,
+            tools=None,
+        )
+
+        parsed = res.get("parsed") if isinstance(res, dict) else None
+        if isinstance(parsed, dict) and parsed.get("kind") == "structured":
+            structured = parsed.get("structured")
+            if isinstance(structured, dict):
+                return structured
+            return {"type": "noop", "reason": "llm returned non-object structured output"}
+
+        if isinstance(parsed, dict) and parsed.get("kind") == "markdown":
+            md = parsed.get("markdown")
+            if isinstance(md, str):
+                j = self._try_parse_json_loose(md)
+                if isinstance(j, dict):
+                    return j
+                return {"type": "noop", "reason": "llm returned non-json markdown"}
+
+        raw = res.get("raw") if isinstance(res, dict) else None
+        p2 = parse_llm_response(raw)
+        if p2["kind"] == "structured" and isinstance(p2["structured"], dict):
+            return p2["structured"]
+        if p2["kind"] == "markdown" and isinstance(p2["markdown"], str):
+            j = self._try_parse_json_loose(p2["markdown"])
+            if isinstance(j, dict):
+                return j
+        return {"type": "noop", "reason": "llm output parse failed"}
 
     @staticmethod
     def _summarize_message(m: Message, max_len: int = 200) -> str:
@@ -291,16 +597,8 @@ class TickRunner:
             reverse=True,
         )
         threads_digest = threads_all[:12]
-        # TODO: Use the function tool to allow the PC to browse history(thread_posts) on demand.
-        for td in threads_digest:
-            if td.get("locked") is True:
-                continue
-            thread_id = str(td.get("thread_id") or "").strip()
-            if not thread_id:
-                td["thread_posts"] = []
-                continue
-            thread_msgs = await self._store.list_messages_by_thread(thread_id, limit=80)
-            td["thread_posts"] = [self._summarize_message(m, max_len=1200) for m in thread_msgs[-8:]]
+        # NOTE: Intentionally do NOT embed thread posts here. We only provide a lightweight digest and
+        # fetch the selected thread context in a follow-up round (reply_select -> reply_write).
 
         forum_channels = [{"id": c.id, "title": c.title, "description": c.description, "group": c.group} for c in forum_convs]
 
@@ -825,12 +1123,14 @@ class TickRunner:
                         "type": "noop",
                         "reason": "no thread to reply",
                     }
-                now = utc_now_iso()
+                thread = next((t for t in threads if not t.locked), None)
+                if thread is None:
+                    return {"type": "noop", "reason": "no unlocked thread to reply"}
                 return {
-                    "type": "reply",
+                    "type": "reply_select",
                     "channel_id": forum_channels[0],
-                    "thread_id": threads[0].id,
-                    "content": f"【自动行动】回复一下（{now[:19]}）",
+                    "thread_id": thread.id,
+                    "selection_reason": "demo_fake: pick first unlocked thread",
                 }
             if m == 3:
                 now = utc_now_iso()
