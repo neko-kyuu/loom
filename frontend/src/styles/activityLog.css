@@ -105,7 +105,7 @@ html[data-theme="milktea"] .activityOverlay {
   color: var(--muted);
   font-size: 12px;
   font-weight: 900;
-  white-space: nowrap;
+  word-break: break-word;
 }
 
 .activitySummary {
