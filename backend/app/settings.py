@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     openai_pc_models: dict[str, str | None] = Field(default_factory=dict)
     openai_pc_personas: dict[str, str | None] = Field(default_factory=dict)
 
+    memory_recall_budget_chars: int = 1200
+    memory_recall_max_items: int = 6
+    memory_recall_max_keywords: int = 12
+
 
 @lru_cache
 def get_settings() -> Settings:

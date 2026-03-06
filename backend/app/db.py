@@ -829,6 +829,89 @@ class SqliteStore:
             rows = await cur.fetchall()
         return [self._memory_from_row(row) for row in rows]
 
+    async def search_memories(
+        self,
+        *,
+        keywords: Iterable[str],
+        owner_pc_id: str | None = None,
+        include_public: bool = False,
+        direct_scope_id: str | None = None,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> list[MemoryEntry]:
+        cleaned_keywords: list[str] = []
+        seen_keywords: set[str] = set()
+        for keyword in keywords:
+            if not isinstance(keyword, str):
+                continue
+            text = keyword.strip()
+            if not text:
+                continue
+            dedupe_key = text.casefold()
+            if dedupe_key in seen_keywords:
+                continue
+            seen_keywords.add(dedupe_key)
+            cleaned_keywords.append(text)
+
+        scope_clauses: list[str] = []
+        scope_params: list[str] = []
+        if owner_pc_id:
+            scope_clauses.append("(scope='pc' AND owner_pc_id=?)")
+            scope_params.append(owner_pc_id)
+        if include_public:
+            scope_clauses.append("(scope='public')")
+        if direct_scope_id:
+            scope_clauses.append("(scope='direct' AND scope_id=?)")
+            scope_params.append(direct_scope_id)
+
+        if not scope_clauses:
+            return []
+        if not cleaned_keywords:
+            return []
+
+        where_parts = [f"({' OR '.join(scope_clauses)})"]
+        params: list[str | int] = list(scope_params)
+
+        if kind is not None:
+            where_parts.append("kind=?")
+            params.append(kind)
+
+        like_parts: list[str] = []
+        for keyword in cleaned_keywords:
+            like_parts.append("(summary LIKE ? OR content LIKE ?)")
+            like_value = f"%{keyword}%"
+            params.extend([like_value, like_value])
+        where_parts.append(f"({' OR '.join(like_parts)})")
+
+        where_sql = " WHERE " + " AND ".join(where_parts)
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
+                "subject_type, subject_id, importance, score, access_count, last_accessed_at, meta_json "
+                "FROM memories"
+                f"{where_sql} "
+                "ORDER BY score DESC, updated_at DESC LIMIT ?",
+                (*params, limit),
+            )
+            rows = await cur.fetchall()
+        return [self._memory_from_row(row) for row in rows]
+
+    async def touch_memories(self, memory_ids: Iterable[str]) -> None:
+        ids = [memory_id for memory_id in memory_ids if isinstance(memory_id, str) and memory_id.strip()]
+        if not ids:
+            return
+
+        now = self._utc_now_iso()
+        async with aiosqlite.connect(self._path) as db:
+            await db.executemany(
+                "UPDATE memories SET access_count=access_count+1, score=score+1, last_accessed_at=?, updated_at=? "
+                "WHERE id=?",
+                [(now, now, memory_id) for memory_id in ids],
+            )
+            await db.commit()
+
     @staticmethod
     def _memory_from_row(row: aiosqlite.Row) -> MemoryEntry:
         return MemoryEntry(

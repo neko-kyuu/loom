@@ -56,11 +56,11 @@
     },
     {
       "role": "user",
-      "content": "<selected_thread>\n{{selected_thread_json}}\n</selected_thread>\n<thread_context>\n{{thread_context_json}}\n</thread_context>"
+      "content": "<selected_thread>\n{{selected_thread_json}}\n</selected_thread>\n<thread_context>\n{{thread_context_json}}\n</thread_context>\n<memories>\n{{memories_json}}\n</memories>"
     },
     {
       "role": "system",
-      "content": "<writing_style>\n论坛很自由，没有硬性的格式和文体规定。但为了阅读的舒适性，有以下几点准则。\n\n风格准则：\n用符合你的人设的语气发言，注重真实人情味，自然通顺的白描笔法，不堆砌、生硬造词。赋予角色真实的人格与感情，用第一人称“我”来代入角色。\n\n多样性：\n- 不得重复前文的台词/桥段/场景\n- 叙事发展意味着变化，剧情推进后不得采用重复的关键元素\n\n去僵硬：\n你是个具有文学素养的人，对自己写的内容有良好的品味要求。同时，你充分理解论坛应保有其趣味性与活力，你不会使用以下或类似的句式使帖子变得死板：\n- xx，您这话问得……\n- xx，看到您的话——“一段原文引用”\n</writing_style>\n<output>\n你必须只输出 1 个 JSON object（reply 或 noop）。禁止输出 Markdown/代码块/解释文字。\nJSON object schema必须符合<hard_constraints>约束\n\n 从<recall>中检查你最近做过的行动，如有两条以上相同理由的 noop 跳过，立刻执行时间快进，或主动切换话题，不要持续陷在 noop 的重复循环中。\n</output>"
+      "content": "<writing_style>\n论坛很自由，没有硬性的格式和文体规定。但为了阅读的舒适性，有以下几点准则。\n\n风格准则：\n用符合你的人设的语气发言，注重真实人情味，自然通顺的白描笔法，不堆砌、生硬造词。赋予角色真实的人格与感情，用第一人称“我”来代入角色。\n\n多样性：\n- 不得重复前文的台词/桥段/场景\n- 叙事发展意味着变化，剧情推进后不得采用重复的关键元素\n\n去僵硬：\n你是个具有文学素养的人，对自己写的内容有良好的品味要求。同时，你充分理解论坛应保有其趣味性与活力，你不会使用以下或类似的句式使帖子变得死板：\n- xx，您这话问得……\n- xx，看到您的话——“一段原文引用”\n</writing_style>\n<memory_rules>\n- <memories> 只是一小组辅助线索；只吸收与当前帖子直接相关的点\n- 不要整段复述记忆，不要把记忆原样搬进帖子\n- 若 <memories> 为空，就仅依据 thread_context 正常回复\n</memory_rules>\n<output>\n你必须只输出 1 个 JSON object（reply 或 noop）。禁止输出 Markdown/代码块/解释文字。\nJSON object schema必须符合<hard_constraints>约束\n</output>"
     }
   ]
   ,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,7 @@ from .actions import (
 from .db import SqliteStore
 from .engine import DemoEngine
 from .llm import LlmService, openai_chat_completions_url, parse_llm_response
-from .models import Actor, ForumThread, Message, PcActivity, TickRecord, utc_now_iso
+from .models import Actor, ForumThread, MemoryEntry, Message, PcActivity, TickRecord, utc_now_iso
 from .settings import Settings
 from .ws import ConnectionManager
 
@@ -34,6 +35,40 @@ class TickRunnerState:
 
 
 class TickRunner:
+    _MEMORY_TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}")
+    _MEMORY_STOPWORDS = {
+        "这个",
+        "那个",
+        "什么",
+        "为什么",
+        "怎么",
+        "我们",
+        "你们",
+        "他们",
+        "自己",
+        "已经",
+        "还是",
+        "如果",
+        "因为",
+        "所以",
+        "然后",
+        "但是",
+        "就是",
+        "一个",
+        "一些",
+        "这种",
+        "那种",
+        "这里",
+        "那里",
+        "当前",
+        "最近",
+        "论坛",
+        "帖子",
+        "thread",
+        "reply",
+        "selected",
+    }
+
     def __init__(
         self,
         *,
@@ -433,6 +468,11 @@ class TickRunner:
         if not (self._settings.openai_base_url and self._settings.openai_api_key):
             return {"type": "noop", "reason": "missing openai_base_url/api_key"}
 
+        memories_payload, used_memory_ids = await self._recall_reply_memories(
+            pc_id=pc_id,
+            selected_thread=selected_thread,
+            thread_context=thread_context,
+        )
         persona_text = (persona or "").strip() or f"你是{pc_name}。"
         messages = render_prompt_messages(
             "tick_runner.reply_write",
@@ -442,8 +482,11 @@ class TickRunner:
                 "persona": persona_text,
                 "selected_thread_json": json.dumps(selected_thread, ensure_ascii=False),
                 "thread_context_json": json.dumps(thread_context, ensure_ascii=False),
+                "memories_json": json.dumps(memories_payload, ensure_ascii=False),
             },
         )
+        if used_memory_ids:
+            await self._store.touch_memories(used_memory_ids)
 
         model = getattr(next((p for p in self._engine.pcs if p.id == pc_id), None), "model", None)
         if not isinstance(model, str) or not model.strip():
@@ -725,6 +768,152 @@ class TickRunner:
             content = content[:max_len] + "…"
         content = content.replace("\n", "\\n")
         return f"{who}: {content}"
+
+    def _build_reply_memory_keywords(
+        self,
+        *,
+        selected_thread: dict[str, Any],
+        thread_context: dict[str, Any],
+    ) -> list[str]:
+        limit = max(1, int(self._settings.memory_recall_max_keywords))
+        keywords: list[str] = []
+        seen: set[str] = set()
+
+        def add_keyword(value: str | None) -> None:
+            if not isinstance(value, str):
+                return
+            text = value.strip()
+            if not text:
+                return
+            key = text.casefold()
+            if key in seen:
+                return
+            seen.add(key)
+            keywords.append(text)
+
+        title = selected_thread.get("title")
+        if isinstance(title, str) and title.strip():
+            add_keyword(title.strip())
+
+        texts: list[str] = []
+        if isinstance(title, str):
+            texts.append(title)
+
+        op_post = thread_context.get("op_post")
+        if isinstance(op_post, dict):
+            content = op_post.get("content")
+            if isinstance(content, str):
+                texts.append(content)
+
+        recent_posts = thread_context.get("recent_posts")
+        if isinstance(recent_posts, list):
+            for post in recent_posts[-6:]:
+                if not isinstance(post, dict):
+                    continue
+                content = post.get("content")
+                if isinstance(content, str):
+                    texts.append(content)
+
+        combined = "\n".join(texts)
+        for pc in self._engine.pcs:
+            if pc.name and pc.name in combined:
+                add_keyword(pc.name)
+
+        weights: dict[str, int] = {}
+        for match in self._MEMORY_TOKEN_PATTERN.findall(combined):
+            token = match.strip()
+            if not token:
+                continue
+            norm = token.casefold()
+            if norm in self._MEMORY_STOPWORDS:
+                continue
+            if norm.isdigit():
+                continue
+            if len(token) <= 1:
+                continue
+            weights[token] = weights.get(token, 0) + 1
+
+        sorted_tokens = sorted(weights.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))
+        for token, _ in sorted_tokens:
+            add_keyword(token)
+            if len(keywords) >= limit:
+                break
+
+        return keywords[:limit]
+
+    @staticmethod
+    def _trim_memory_text(text: str, *, max_len: int) -> str:
+        cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if len(cleaned) > max_len:
+            return cleaned[:max_len] + "…"
+        return cleaned
+
+    def _format_memories_for_prompt(self, memories: list[MemoryEntry]) -> tuple[list[dict[str, Any]], list[str]]:
+        max_items = max(1, int(self._settings.memory_recall_max_items))
+        remaining = max(0, int(self._settings.memory_recall_budget_chars))
+        packed: list[dict[str, Any]] = []
+        used_ids: list[str] = []
+
+        for memory in memories:
+            if len(packed) >= max_items or remaining <= 0:
+                break
+
+            content = self._trim_memory_text(memory.content, max_len=320)
+            summary = self._trim_memory_text(memory.summary, max_len=120)
+            chosen_text = content
+            source = "content"
+            if len(chosen_text) > remaining:
+                chosen_text = summary
+                source = "summary"
+            if len(chosen_text) > remaining:
+                if remaining < 24:
+                    break
+                chosen_text = self._trim_memory_text(chosen_text, max_len=remaining)
+                source = f"{source}_trimmed"
+
+            if not chosen_text:
+                continue
+
+            packed.append(
+                {
+                    "id": memory.id,
+                    "scope": memory.scope,
+                    "kind": memory.kind,
+                    "subject_id": memory.subject_id,
+                    "text": chosen_text,
+                    "score": memory.score,
+                    "source": source,
+                }
+            )
+            used_ids.append(memory.id)
+            remaining -= len(chosen_text)
+
+        return packed, used_ids
+
+    async def _recall_reply_memories(
+        self,
+        *,
+        pc_id: str,
+        selected_thread: dict[str, Any],
+        thread_context: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        keywords = self._build_reply_memory_keywords(selected_thread=selected_thread, thread_context=thread_context)
+        memories = await self._store.search_memories(
+            keywords=keywords,
+            owner_pc_id=pc_id,
+            include_public=True,
+            limit=max(20, int(self._settings.memory_recall_max_items) * 4),
+        )
+        if not memories:
+            memories = await self._store.list_memories(
+                scope="pc",
+                owner_pc_id=pc_id,
+                kind="autobiography",
+                limit=min(2, max(1, int(self._settings.memory_recall_max_items))),
+            )
+
+        payload, used_ids = self._format_memories_for_prompt(memories)
+        return payload, used_ids
 
     @staticmethod
     def _try_parse_json_loose(text: str) -> Any | None:
