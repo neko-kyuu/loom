@@ -49,6 +49,8 @@ import {
   type ChannelsState
 } from "./lib/channels";
 
+type DirectThreadKey = "__all__" | "__unknown__" | "dm" | string;
+
 function conversationLabel(c: Conversation, profiles: ProfilesState) {
   if (c.kind === "broadcast") return "#broadcast";
   if (c.kind === "forum") return c.title;
@@ -71,6 +73,44 @@ function conversationIcon(c: Conversation) {
   if (c.kind === "broadcast") return <Hash size={16} />;
   if (c.kind === "forum") return <List size={16} />;
   return <MessageCircle size={16} />;
+}
+
+function messageHasActor(m: Message, pred: (a: Actor) => boolean): boolean {
+  if (pred(m.from_actor)) return true;
+  for (const a of m.to || []) if (pred(a)) return true;
+  return false;
+}
+
+function messageHasPcId(m: Message, pcId: string): boolean {
+  const id = (pcId || "").trim();
+  if (!id) return false;
+  return messageHasActor(m, (a) => a.kind === "pc" && Boolean(a.id) && a.id === id);
+}
+
+function messageHasDm(m: Message): boolean {
+  return messageHasActor(m, (a) => a.kind === "dm");
+}
+
+function directPeerKeyFromMessage(m: Message, viewerPcId: string): DirectThreadKey {
+  if (messageHasDm(m)) return "dm";
+  const otherPcIds: string[] = [];
+  const pushPc = (a: Actor) => {
+    if (a.kind !== "pc") return;
+    const pid = (a.id || "").trim();
+    if (!pid) return;
+    if (pid === viewerPcId) return;
+    if (!otherPcIds.includes(pid)) otherPcIds.push(pid);
+  };
+  pushPc(m.from_actor);
+  for (const a of m.to || []) pushPc(a);
+  return otherPcIds[0] || "__unknown__";
+}
+
+function messageMatchesDirectThread(m: Message, viewerPcId: string, key: DirectThreadKey): boolean {
+  if (key === "__all__") return true;
+  if (key === "dm") return messageHasDm(m);
+  if (key === "__unknown__") return !messageHasDm(m) && directPeerKeyFromMessage(m, viewerPcId) === "__unknown__";
+  return messageHasPcId(m, key);
 }
 
 function buildDmTargetsByBatchId(messagesByConversation: Record<string, Message[]>): Record<string, string[]> {
@@ -135,6 +175,8 @@ export default function App() {
   const [directSelectionTouched, setDirectSelectionTouched] = useState(false);
   const [threadDirectSelectedPcIds, setThreadDirectSelectedPcIds] = useState<string[]>([]);
   const [threadDirectSelectionTouched, setThreadDirectSelectionTouched] = useState(false);
+  const [directThreadByConvId, setDirectThreadByConvId] = useState<Record<string, DirectThreadKey>>({});
+  const [directDetailOnly, setDirectDetailOnly] = useState(false);
 
   const wsRef = useRef<ReturnType<typeof createWs> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -314,6 +356,7 @@ export default function App() {
   function jumpToDm(pcId: string, sendBatchId: string) {
     const convId = `dm_to_${pcId}`;
     setActiveConvId(convId);
+    setDirectThreadByConvId((prev) => ({ ...prev, [convId]: "dm" }));
     setPendingScroll({ conversationId: convId, sendBatchId });
   }
 
@@ -494,6 +537,10 @@ export default function App() {
   }, [activeConvId, conversations]);
 
   useEffect(() => {
+    setDirectDetailOnly(false);
+  }, [activeConvId]);
+
+  useEffect(() => {
     if (!activeForumThreadId) return;
     const conv = conversations.find((c) => c.id === activeConvId);
     if (conv?.kind !== "forum") return;
@@ -503,12 +550,78 @@ export default function App() {
     setForumDetailOnly(false);
   }, [activeConvId, activeForumThreadId, conversations, forumThreadsByChannel]);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeConvId, messagesByConv[activeConvId]?.length]);
-
   const activeMessages = messagesByConv[activeConvId] || [];
   const activeConv = conversations.find((c) => c.id === activeConvId);
+
+  const directViewerPcId = activeConv?.kind === "dm_to_pc" ? activeConv.id.replace(/^dm_to_/, "") : null;
+  const directThreads = useMemo(() => {
+    if (activeConv?.kind !== "dm_to_pc" || !directViewerPcId) return [];
+    const viewerId = directViewerPcId;
+    const byKey = new Map<DirectThreadKey, { lastTs: string; preview: string; count: number }>();
+    const update = (key: DirectThreadKey, m: Message) => {
+      const ts = m.timestamp || "";
+      const prev = byKey.get(key);
+      const content = (m.content || "").trim();
+      const preview = content.length > 140 ? content.slice(0, 140) + "…" : content;
+      if (!prev) {
+        byKey.set(key, { lastTs: ts, preview, count: 1 });
+        return;
+      }
+      prev.count += 1;
+      if (ts && (!prev.lastTs || ts > prev.lastTs)) {
+        prev.lastTs = ts;
+        prev.preview = preview;
+      }
+    };
+
+    for (const m of activeMessages) {
+      update("__all__", m);
+      if (!messageHasPcId(m, viewerId)) {
+        update("__unknown__", m);
+        continue;
+      }
+      const peerKey = directPeerKeyFromMessage(m, viewerId);
+      update(peerKey, m);
+    }
+
+    const threads: { key: DirectThreadKey; lastTs: string; preview: string; count: number }[] = [];
+    for (const [key, v] of byKey.entries()) threads.push({ key, ...v });
+
+    const keyOrder = (k: DirectThreadKey) => {
+      if (k === "__all__") return 0;
+      if (k === "dm") return 1;
+      if (k === "__unknown__") return 99;
+      return 2;
+    };
+    threads.sort((a, b) => {
+      const ao = keyOrder(a.key);
+      const bo = keyOrder(b.key);
+      if (ao !== bo) return ao - bo;
+      if (a.lastTs !== b.lastTs) return (b.lastTs || "").localeCompare(a.lastTs || "");
+      return String(a.key).localeCompare(String(b.key));
+    });
+    return threads;
+  }, [activeConv?.kind, activeMessages, directViewerPcId]);
+
+  const directSelectedThreadKey = useMemo(() => {
+    if (activeConv?.kind !== "dm_to_pc") return "__all__" as DirectThreadKey;
+    const keys = new Set(directThreads.map((t) => t.key));
+    const stored = directThreadByConvId[activeConvId];
+    if (stored && keys.has(stored)) return stored;
+    if (keys.has("dm")) return "dm";
+    if (keys.has("__all__")) return "__all__";
+    return "__unknown__";
+  }, [activeConv?.kind, activeConvId, directThreadByConvId, directThreads]);
+
+  const displayedMessages = useMemo(() => {
+    if (activeConv?.kind !== "dm_to_pc" || !directViewerPcId) return activeMessages;
+    return activeMessages.filter((m) => messageMatchesDirectThread(m, directViewerPcId, directSelectedThreadKey));
+  }, [activeConv?.kind, activeMessages, directSelectedThreadKey, directViewerPcId]);
+
+  useEffect(() => {
+    if (activeConv?.kind === "forum") return;
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activeConvId, activeConv?.kind, directSelectedThreadKey, displayedMessages.length]);
   const forumThreadsRaw = activeConv?.kind === "forum" ? forumThreadsByChannel[activeConv.id] || [] : [];
   const forumThreads = useMemo(
     () =>
@@ -1136,56 +1249,148 @@ export default function App() {
             ) : null}
           </div>
         ) : (
-          <ChatFlow
-            messages={activeMessages}
-            profiles={profiles}
-            typingNames={typingNames}
-            endRef={messagesEndRef}
-            onOpenProfile={(actor, e) => openProfile(actor, e)}
-            onDeleteMessage={deleteMessage}
-            onEditMessage={editMessage}
-            directViewerPcId={activeConv?.kind === "dm_to_pc" ? activeConv.id.replace(/^dm_to_/, "") : null}
-            dmTargetsByBatchId={dmTargetsByBatchId}
-            onJumpToDm={jumpToDm}
-            scrollToSendBatchId={
-              pendingScroll && pendingScroll.conversationId === activeConvId ? pendingScroll.sendBatchId : null
-            }
-            onClearScrollToSendBatchId={() => setPendingScroll(null)}
-            composer={
-              activeConv?.kind === "dm_to_pc" || activeConv?.kind === "pc_to_pc"
-                ? undefined
-                : {
-                    value: content,
-                    onChange: (next) => {
-                      setContent(next);
-                      if (uiError) setUiError(null);
-                    },
-                    placeholder: connected
-                      ? isDirectDraft
-                        ? "私聊内容…（/direct 后面写要发送的文字）"
-                        : "输入消息（默认广播）…"
-                      : "正在连接后端…",
-                    error: uiError,
-                    onClearError: () => {
-                      if (uiError) setUiError(null);
-                    },
-                    canSend,
-                    onSend: sendInject,
-                    pill: { isDirect: isDirectDraft, normalLabel: "#broadcast", directSelectedCount: directSelectedPcIds.length },
-                    hint: (
-                      <>
-                        私聊：<code>/direct</code> 后勾选对象（或 <code>/direct Alice：你好</code>）
-                      </>
-                    ),
-                    directPicker: {
-                      pcs,
-                      selectedPcIds: directSelectedPcIds,
-                      setSelectedPcIds: setDirectSelectedPcIds,
-                      setSelectionTouched: setDirectSelectionTouched
-                    }
+          activeConv?.kind === "dm_to_pc" && directViewerPcId ? (
+            <div className={`forumShell ${directDetailOnly ? "detailOnly" : "split"}`}>
+              {directDetailOnly ? null : (
+                <div className="threadList">
+                  <div className="threadListInner">
+                    {directThreads.length ? (
+                      directThreads.map((t) => {
+                        const isActive = t.key === directSelectedThreadKey;
+                        const title = (() => {
+                          if (t.key === "__all__") return "全部";
+                          if (t.key === "dm") return "DM";
+                          if (t.key === "__unknown__") return "未识别";
+                          const name = chatDisplayName(profiles, { kind: "pc", id: t.key });
+                          return name ? `@${name}` : `@${t.key}`;
+                        })();
+                        return (
+                          <button
+                            key={t.key}
+                            className={`threadItem ${isActive ? "active" : ""}`}
+                            onClick={() => {
+                              setDirectThreadByConvId((prev) => ({ ...prev, [activeConvId]: t.key }));
+                              setDirectDetailOnly(false);
+                            }}
+                          >
+                            <div className="threadTitle">{title}</div>
+                            <div className="threadMeta">
+                              <span>{t.lastTs ? formatTime(t.lastTs) : "—"}</span>
+                              <span>·</span>
+                              <span>{t.count} 条</span>
+                            </div>
+                            {t.preview ? <div className="threadPreview">{t.preview}</div> : null}
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="forumEmpty">暂无私聊记录</div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="threadDetail">
+                <div className="threadDetailHeader">
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <h2 className="threadDetailTitle">{conversationLabel(activeConv, profiles)}</h2>
+                      <div className="threadDetailSub">
+                        {directSelectedThreadKey === "__all__"
+                          ? "全部私聊记录（含 PC↔PC 复制）"
+                          : directSelectedThreadKey === "dm"
+                            ? "DM ↔ PC"
+                            : directSelectedThreadKey === "__unknown__"
+                              ? "未识别来源/对象"
+                              : `${chatDisplayName(profiles, { kind: "pc", id: directSelectedThreadKey }) || directSelectedThreadKey} ↔ PC`}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flex: "0 0 auto" }}>
+                      <button
+                        className="smallBtn"
+                        onClick={() => {
+                          setDirectDetailOnly((v) => !v);
+                        }}
+                      >
+                        {directDetailOnly ? "显示列表" : "完整视图"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <ChatFlow
+                  messages={displayedMessages}
+                  profiles={profiles}
+                  typingNames={typingNames}
+                  endRef={messagesEndRef}
+                  onOpenProfile={(actor, e) => openProfile(actor, e)}
+                  onDeleteMessage={deleteMessage}
+                  onEditMessage={editMessage}
+                  directViewerPcId={directViewerPcId}
+                  dmTargetsByBatchId={dmTargetsByBatchId}
+                  onJumpToDm={jumpToDm}
+                  scrollToSendBatchId={
+                    pendingScroll && pendingScroll.conversationId === activeConvId ? pendingScroll.sendBatchId : null
                   }
-            }
-          />
+                  onClearScrollToSendBatchId={() => setPendingScroll(null)}
+                />
+              </div>
+            </div>
+          ) : (
+            <ChatFlow
+              messages={activeMessages}
+              profiles={profiles}
+              typingNames={typingNames}
+              endRef={messagesEndRef}
+              onOpenProfile={(actor, e) => openProfile(actor, e)}
+              onDeleteMessage={deleteMessage}
+              onEditMessage={editMessage}
+              directViewerPcId={activeConv?.kind === "dm_to_pc" ? activeConv.id.replace(/^dm_to_/, "") : null}
+              dmTargetsByBatchId={dmTargetsByBatchId}
+              onJumpToDm={jumpToDm}
+              scrollToSendBatchId={
+                pendingScroll && pendingScroll.conversationId === activeConvId ? pendingScroll.sendBatchId : null
+              }
+              onClearScrollToSendBatchId={() => setPendingScroll(null)}
+              composer={
+                activeConv?.kind === "dm_to_pc" || activeConv?.kind === "pc_to_pc"
+                  ? undefined
+                  : {
+                      value: content,
+                      onChange: (next) => {
+                        setContent(next);
+                        if (uiError) setUiError(null);
+                      },
+                      placeholder: connected
+                        ? isDirectDraft
+                          ? "私聊内容…（/direct 后面写要发送的文字）"
+                          : "输入消息（默认广播）…"
+                        : "正在连接后端…",
+                      error: uiError,
+                      onClearError: () => {
+                        if (uiError) setUiError(null);
+                      },
+                      canSend,
+                      onSend: sendInject,
+                      pill: {
+                        isDirect: isDirectDraft,
+                        normalLabel: "#broadcast",
+                        directSelectedCount: directSelectedPcIds.length
+                      },
+                      hint: (
+                        <>
+                          私聊：<code>/direct</code> 后勾选对象（或 <code>/direct Alice：你好</code>）
+                        </>
+                      ),
+                      directPicker: {
+                        pcs,
+                        selectedPcIds: directSelectedPcIds,
+                        setSelectedPcIds: setDirectSelectedPcIds,
+                        setSelectionTouched: setDirectSelectionTouched
+                      }
+                    }
+              }
+            />
+          )
         )}
       </main>
 
