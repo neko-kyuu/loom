@@ -125,6 +125,7 @@ class MemoryEntry(BaseModel):
     subject_id: str | None = None
     importance: int = 0
     score: int = 0
+    pinned: bool = False
     access_count: int = 0
     last_accessed_at: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)

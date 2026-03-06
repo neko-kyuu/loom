@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS memories (
   subject_id TEXT,
   importance INTEGER NOT NULL DEFAULT 0,
   score INTEGER NOT NULL DEFAULT 0,
+  pinned INTEGER NOT NULL DEFAULT 0,
   access_count INTEGER NOT NULL DEFAULT 0,
   last_accessed_at TEXT,
   meta_json TEXT NOT NULL DEFAULT '{}',
@@ -169,6 +170,12 @@ class SqliteStore:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_send_batch ON messages(send_batch_id, timestamp)"
             )
+
+        cur = await db.execute("PRAGMA table_info(memories)")
+        cols = await cur.fetchall()
+        col_names = {r["name"] for r in cols}
+        if cols and "pinned" not in col_names:
+            await db.execute("ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
 
     async def upsert_conversations(self, conversations: Iterable[Conversation]) -> None:
         rows = [(c.id, c.model_dump_json()) for c in conversations]
@@ -746,6 +753,7 @@ class SqliteStore:
                 memory.subject_id,
                 memory.importance,
                 memory.score,
+                1 if memory.pinned else 0,
                 memory.access_count,
                 memory.last_accessed_at,
                 json.dumps(memory.meta, ensure_ascii=False),
@@ -759,13 +767,13 @@ class SqliteStore:
             await db.executemany(
                 "INSERT INTO memories("
                 "id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
-                "subject_type, subject_id, importance, score, access_count, last_accessed_at, meta_json"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, meta_json"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "scope=excluded.scope, scope_id=excluded.scope_id, owner_pc_id=excluded.owner_pc_id, "
                 "kind=excluded.kind, updated_at=excluded.updated_at, content=excluded.content, "
                 "summary=excluded.summary, subject_type=excluded.subject_type, subject_id=excluded.subject_id, "
-                "importance=excluded.importance, score=excluded.score, access_count=excluded.access_count, "
+                "importance=excluded.importance, score=excluded.score, pinned=excluded.pinned, access_count=excluded.access_count, "
                 "last_accessed_at=excluded.last_accessed_at, meta_json=excluded.meta_json",
                 rows,
             )
@@ -776,7 +784,7 @@ class SqliteStore:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
-                "subject_type, subject_id, importance, score, access_count, last_accessed_at, meta_json "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, meta_json "
                 "FROM memories WHERE id=?",
                 (memory_id,),
             )
@@ -793,6 +801,7 @@ class SqliteStore:
         scope_id: str | None = None,
         kind: str | None = None,
         subject_id: str | None = None,
+        pinned: bool | None = None,
         limit: int = 200,
     ) -> list[MemoryEntry]:
         where: list[str] = []
@@ -813,6 +822,9 @@ class SqliteStore:
         if subject_id is not None:
             where.append("subject_id=?")
             params.append(subject_id)
+        if pinned is not None:
+            where.append("pinned=?")
+            params.append(1 if pinned else 0)
 
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
 
@@ -820,7 +832,7 @@ class SqliteStore:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
-                "subject_type, subject_id, importance, score, access_count, last_accessed_at, meta_json "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, meta_json "
                 "FROM memories"
                 f"{where_sql} "
                 "ORDER BY score DESC, updated_at DESC LIMIT ?",
@@ -889,7 +901,7 @@ class SqliteStore:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
-                "subject_type, subject_id, importance, score, access_count, last_accessed_at, meta_json "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, meta_json "
                 "FROM memories"
                 f"{where_sql} "
                 "ORDER BY score DESC, updated_at DESC LIMIT ?",
@@ -920,7 +932,7 @@ class SqliteStore:
             db.row_factory = aiosqlite.Row
 
             cur = await db.execute(
-                "SELECT COUNT(1) AS c FROM memories WHERE kind != 'autobiography'"
+                "SELECT COUNT(1) AS c FROM memories WHERE pinned=0 AND kind != 'autobiography'"
             )
             row = await cur.fetchone()
             candidates = int(row["c"] if row else 0)
@@ -928,13 +940,13 @@ class SqliteStore:
             decayed = 0
             if decay_k > 0 and candidates > 0:
                 cur = await db.execute(
-                    "UPDATE memories SET score=score-?, updated_at=? WHERE kind != 'autobiography'",
+                    "UPDATE memories SET score=score-?, updated_at=? WHERE pinned=0 AND kind != 'autobiography'",
                     (decay_k, self._utc_now_iso()),
                 )
                 decayed = int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else candidates)
 
             cur = await db.execute(
-                "DELETE FROM memories WHERE kind != 'autobiography' AND score < ?",
+                "DELETE FROM memories WHERE pinned=0 AND kind != 'autobiography' AND score < ?",
                 (delete_threshold,),
             )
             deleted = int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0)
@@ -970,6 +982,7 @@ class SqliteStore:
             subject_id=row["subject_id"],
             importance=row["importance"],
             score=row["score"],
+            pinned=bool(row["pinned"]),
             access_count=row["access_count"],
             last_accessed_at=row["last_accessed_at"],
             meta=json.loads(row["meta_json"] or "{}"),

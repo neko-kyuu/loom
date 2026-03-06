@@ -17,7 +17,7 @@ from .db import SqliteStore
 from .demo_forum import DemoForumSeedConfig, build_demo_forum_seed
 from .engine import DemoEngine, ForumChannel
 from .llm import LlmService
-from .models import Actor, Event, Message, WsClientToServer
+from .models import Actor, Event, MemoryEntry, Message, WsClientToServer
 from .state import build_state_message
 from .settings import get_settings
 from .tick_runner import TickRunner
@@ -444,6 +444,7 @@ async def get_memories(
     scope_id: str | None = None,
     kind: str | None = None,
     subject_id: str | None = None,
+    pinned: bool | None = None,
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
     items = await store.list_memories(
@@ -452,6 +453,7 @@ async def get_memories(
         scope_id=scope_id,
         kind=kind,
         subject_id=subject_id,
+        pinned=pinned,
         limit=limit,
     )
     state_raw = await store.get_setting_json("tick_runner_state")
@@ -509,6 +511,98 @@ async def post_memories_decay(payload: dict[str, Any] | None = Body(default=None
         )
     )
     return {"ok": True, "turn_no": turn_no, "stats": stats}
+
+
+def _assert_manual_memory_kind(kind: str) -> str:
+    normalized = kind.strip()
+    if normalized not in {"autobiography", "secret"}:
+        raise HTTPException(status_code=400, detail="manual memory kind must be autobiography or secret")
+    return normalized
+
+
+@app.post("/api/memories")
+async def post_memory(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    owner_pc_id = str(payload.get("owner_pc_id") or "").strip()
+    summary = str(payload.get("summary") or "").strip()
+    content = str(payload.get("content") or "").strip()
+    kind = _assert_manual_memory_kind(str(payload.get("kind") or "").strip())
+    if not owner_pc_id:
+        raise HTTPException(status_code=400, detail="owner_pc_id is required")
+    if not summary:
+        raise HTTPException(status_code=400, detail="summary is required")
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+
+    importance_raw = payload.get("importance", 0)
+    try:
+        importance = max(0, min(10, int(importance_raw)))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid importance: {e}") from e
+
+    pinned = bool(payload.get("pinned"))
+    item = MemoryEntry(
+        scope="pc",
+        owner_pc_id=owner_pc_id,
+        kind=kind,
+        summary=summary,
+        content=content,
+        importance=importance,
+        score=importance,
+        pinned=pinned,
+        meta={"manual": True, "source": "memory_debugger"},
+    )
+    await store.upsert_memory(item)
+    return {"ok": True, "item": item.model_dump()}
+
+
+@app.patch("/api/memories/{memory_id}")
+async def patch_memory(memory_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    item = await store.get_memory(memory_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="memory not found")
+
+    patch = dict(payload)
+    if "pinned" in patch:
+        item.pinned = bool(patch["pinned"])
+
+    editable_fields = {"kind", "summary", "content", "importance", "owner_pc_id"}
+    if editable_fields.intersection(patch):
+        if item.scope != "pc" or item.kind not in {"autobiography", "secret"}:
+            raise HTTPException(status_code=400, detail="only pc autobiography/secret memories can be edited manually")
+
+        if "kind" in patch:
+            item.kind = _assert_manual_memory_kind(str(patch.get("kind") or "").strip())
+        if "owner_pc_id" in patch:
+            owner_pc_id = str(patch.get("owner_pc_id") or "").strip()
+            if not owner_pc_id:
+                raise HTTPException(status_code=400, detail="owner_pc_id is required")
+            item.owner_pc_id = owner_pc_id
+        if "summary" in patch:
+            summary = str(patch.get("summary") or "").strip()
+            if not summary:
+                raise HTTPException(status_code=400, detail="summary is required")
+            item.summary = summary
+        if "content" in patch:
+            content = str(patch.get("content") or "").strip()
+            if not content:
+                raise HTTPException(status_code=400, detail="content is required")
+            item.content = content
+        if "importance" in patch:
+            try:
+                item.importance = max(0, min(10, int(patch.get("importance"))))
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"invalid importance: {e}") from e
+            if item.score < item.importance:
+                item.score = item.importance
+
+        meta = dict(item.meta or {})
+        meta["manual"] = True
+        meta["source"] = "memory_debugger"
+        item.meta = meta
+
+    item.updated_at = datetime.now(timezone.utc).isoformat()
+    await store.upsert_memory(item)
+    return {"ok": True, "item": item.model_dump()}
 
 
 async def _send_state(websocket: WebSocket) -> None:

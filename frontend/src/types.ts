@@ -104,3 +104,33 @@ export type LlmLogItem = LlmLogMeta & {
   request_json: string;
   response_json?: string | null;
 };
+
+export type MemoryEntry = {
+  id: string;
+  scope: "pc" | "public" | "direct";
+  scope_id?: string | null;
+  owner_pc_id?: string | null;
+  kind: "autobiography" | "relationship" | "recent_event" | "secret";
+  created_at: string;
+  updated_at: string;
+  content: string;
+  summary: string;
+  subject_type?: string | null;
+  subject_id?: string | null;
+  importance: number;
+  score: number;
+  pinned: boolean;
+  access_count: number;
+  last_accessed_at?: string | null;
+  meta: Record<string, any>;
+};
+
+export type MemoryListResponse = {
+  items: MemoryEntry[];
+  turn_no?: number | null;
+  decay?: {
+    interval_ticks: number;
+    k: number;
+    threshold: number;
+  } | null;
+};

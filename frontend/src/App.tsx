@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Conversation, ForumThread, Message, WsServerToClient } from "./types";
 import { createWs } from "./lib/ws";
-import { Hash, List, MessageCircle, Settings, Pause, Play, ScrollText, Trash2, X, Pin, Lock, Unlock } from "lucide-react";
+import { Brain, Hash, List, MessageCircle, Settings, Pause, Play, ScrollText, Trash2, X, Pin, Lock, Unlock } from "lucide-react";
 import SettingsModal, { type SettingsTabId } from "./components/SettingsModal";
 import PcActivityLogModal from "./components/PcActivityLogModal";
+import MemoryDebuggerModal from "./components/MemoryDebuggerModal";
 import AppearanceTab from "./components/settings/AppearanceTab";
 import ChannelsTab from "./components/settings/ChannelsTab";
 import ProfileTab from "./components/settings/ProfileTab";
@@ -147,6 +148,7 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("appearance");
   const [profileSettingsSelectedId, setProfileSettingsSelectedId] = useState<string>("user");
   const [activityLogOpen, setActivityLogOpen] = useState(false);
+  const [memoryDebuggerOpen, setMemoryDebuggerOpen] = useState(false);
 
   const [appearanceInit] = useState(() => getInitialAppearanceState());
   const [customThemes, setCustomThemes] = useState<CustomTheme[]>(appearanceInit.customThemes);
@@ -1050,6 +1052,15 @@ export default function App() {
             <button
               className="iconBtn iconOnly"
               disabled={!connected}
+              onClick={() => setMemoryDebuggerOpen(true)}
+              aria-label="记忆调试器"
+              title="记忆调试器"
+            >
+              <Brain size={18} />
+            </button>
+            <button
+              className="iconBtn iconOnly"
+              disabled={!connected}
               onClick={() => setActivityLogOpen(true)}
               aria-label="日志"
               title="日志"
@@ -1395,6 +1406,7 @@ export default function App() {
       </main>
 
       <PcActivityLogModal open={activityLogOpen} onClose={() => setActivityLogOpen(false)} />
+      <MemoryDebuggerModal open={memoryDebuggerOpen} onClose={() => setMemoryDebuggerOpen(false)} pcs={pcs} />
 
       <SettingsModal
         open={settingsOpen}

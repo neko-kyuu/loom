@@ -1,4 +1,4 @@
-import type { ForumThread, LlmLogItem, LlmLogMeta, PcActivityLogPage } from "../types";
+import type { ForumThread, LlmLogItem, LlmLogMeta, MemoryEntry, MemoryListResponse, PcActivityLogPage } from "../types";
 
 const DEFAULT_HTTP_BASE = "http://localhost:8080";
 
@@ -81,6 +81,50 @@ export async function getLlmLogs(opts?: { limit?: number }): Promise<{ items: Ll
 
 export async function getLlmLog(logId: string): Promise<{ item: LlmLogItem }> {
   return await jsonFetch(`${httpBase()}/api/llm-logs/${encodeURIComponent(logId)}`);
+}
+
+export async function getMemories(opts?: {
+  scope?: string | null;
+  ownerPcId?: string | null;
+  scopeId?: string | null;
+  kind?: string | null;
+  subjectId?: string | null;
+  pinned?: boolean | null;
+  limit?: number;
+}): Promise<MemoryListResponse> {
+  const q = new URLSearchParams();
+  if (opts?.scope) q.set("scope", opts.scope);
+  if (opts?.ownerPcId) q.set("owner_pc_id", opts.ownerPcId);
+  if (opts?.scopeId) q.set("scope_id", opts.scopeId);
+  if (opts?.kind) q.set("kind", opts.kind);
+  if (opts?.subjectId) q.set("subject_id", opts.subjectId);
+  if (typeof opts?.pinned === "boolean") q.set("pinned", String(opts.pinned));
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return await jsonFetch(`${httpBase()}/api/memories${qs ? `?${qs}` : ""}`);
+}
+
+export async function patchMemory(memoryId: string, patch: Record<string, any>): Promise<MemoryEntry> {
+  const res = await jsonFetch<{ ok: true; item: MemoryEntry }>(
+    `${httpBase()}/api/memories/${encodeURIComponent(memoryId)}`,
+    { method: "PATCH", body: JSON.stringify(patch) }
+  );
+  return res.item;
+}
+
+export async function createMemory(payload: {
+  owner_pc_id: string;
+  kind: "autobiography" | "secret";
+  summary: string;
+  content: string;
+  importance?: number;
+  pinned?: boolean;
+}): Promise<MemoryEntry> {
+  const res = await jsonFetch<{ ok: true; item: MemoryEntry }>(`${httpBase()}/api/memories`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+  return res.item;
 }
 
 export function absoluteAssetUrl(pathOrUrl: string) {

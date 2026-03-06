@@ -1,0 +1,243 @@
+.memoryOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  background: rgba(0, 0, 0, 0.58);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.memoryModal {
+  width: min(1320px, 100%);
+  height: min(820px, 92vh);
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.memoryHeader,
+.memoryPaneHead,
+.memoryEditorFooter,
+.memoryHeaderActions,
+.memoryDetailActions,
+.memoryEditorTypeActions,
+.memoryInlineFields,
+.memoryRowTop,
+.memoryDetailMeta,
+.memoryMetaLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.memoryHeader,
+.memoryError {
+  padding: 12px 14px;
+}
+
+.memoryHeader {
+  border-bottom: 1px solid var(--border);
+  justify-content: space-between;
+}
+
+.memoryTitle {
+  font-weight: 900;
+}
+
+.memorySubTitle,
+.memoryMetaLine,
+.memoryDetailMeta,
+.memoryEmpty,
+.memoryError,
+.memoryHint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.memoryBody {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(280px, 1fr) minmax(320px, 380px);
+  min-height: 0;
+}
+
+.memoryPane {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+}
+
+.memoryDetailPane,
+.memoryEditorPane {
+  border-left: 1px solid var(--border);
+}
+
+.memoryPaneHead {
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.memoryPaneTitle {
+  font-weight: 900;
+}
+
+.memoryFilters,
+.memoryList,
+.memoryDetailCard,
+.memoryEditorForm {
+  padding: 12px 14px;
+}
+
+.memoryFilters,
+.memoryEditorForm {
+  display: grid;
+  gap: 10px;
+}
+
+.memoryList,
+.memoryDetailCard,
+.memoryEditorForm {
+  overflow: auto;
+  min-height: 0;
+}
+
+.memoryList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memoryRow {
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.memoryRow.active {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.memoryBadge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 900;
+  border: 1px solid var(--border);
+}
+
+.kind-autobiography { color: #7bd1ff; }
+.kind-secret { color: #ff9f9f; }
+.kind-relationship { color: #caa6ff; }
+.kind-recent_event { color: #9fe3a8; }
+
+.memoryPinBtn {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.memoryPinBtn.on {
+  color: var(--accent);
+}
+
+.memorySummary,
+.memoryContent {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memoryInlineAction {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0;
+}
+
+.memoryDetailTitle {
+  font-size: 16px;
+  font-weight: 900;
+  margin-bottom: 8px;
+}
+
+.memoryDetailMeta {
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.memoryContent {
+  margin: 0;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.memoryHint {
+  margin-top: 10px;
+}
+
+.memoryEditorBlock {
+  display: grid;
+  gap: 8px;
+}
+
+.memoryEditorRowTop {
+  align-items: start;
+}
+
+.memoryTextarea {
+  min-height: 220px;
+}
+
+.memoryCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.memoryEditorFooter {
+  justify-content: space-between;
+  padding-top: 6px;
+}
+
+.smallBtn.strong {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+}
+
+.memoryError {
+  border-top: 1px solid var(--border);
+  color: #ff9f9f;
+}
+
+@media (max-width: 1100px) {
+  .memoryBody {
+    grid-template-columns: 1fr;
+  }
+
+  .memoryDetailPane,
+  .memoryEditorPane {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}
