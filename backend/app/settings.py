@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     memory_recall_budget_chars: int = 1200
     memory_recall_max_items: int = 6
     memory_recall_max_keywords: int = 12
+    memory_write_max_items: int = 3
+    memory_write_summary_chars: int = 120
+    memory_write_content_chars: int = 400
+    memory_write_source_excerpt_chars: int = 200
 
 
 @lru_cache

@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pc_config.prompts import render_prompt_messages
 
@@ -68,6 +68,7 @@ class TickRunner:
         "reply",
         "selected",
     }
+    _MEMORY_ALLOWED_KINDS = {"autobiography", "relationship", "recent_event"}
 
     def __init__(
         self,
@@ -890,6 +891,332 @@ class TickRunner:
 
         return packed, used_ids
 
+    def _extract_memory_keywords(self, *parts: str) -> list[str]:
+        limit = max(1, int(self._settings.memory_recall_max_keywords))
+        keywords: list[str] = []
+        seen: set[str] = set()
+
+        def add_keyword(value: str | None) -> None:
+            if not isinstance(value, str):
+                return
+            text = value.strip()
+            if not text:
+                return
+            key = text.casefold()
+            if key in seen:
+                return
+            seen.add(key)
+            keywords.append(text)
+
+        combined = "\n".join(part for part in parts if isinstance(part, str) and part.strip())
+        for pc in self._engine.pcs:
+            if pc.name and pc.name in combined:
+                add_keyword(pc.name)
+
+        weights: dict[str, int] = {}
+        for match in self._MEMORY_TOKEN_PATTERN.findall(combined):
+            token = match.strip()
+            if not token:
+                continue
+            norm = token.casefold()
+            if norm in self._MEMORY_STOPWORDS or norm.isdigit() or len(token) <= 1:
+                continue
+            weights[token] = weights.get(token, 0) + 1
+
+        for token, _ in sorted(weights.items(), key=lambda item: (-item[1], -len(item[0]), item[0])):
+            add_keyword(token)
+            if len(keywords) >= limit:
+                break
+
+        return keywords[:limit]
+
+    def _select_memory_writer_model(self, *, actor_pc_id: str | None) -> str | None:
+        if actor_pc_id:
+            model = getattr(next((p for p in self._engine.pcs if p.id == actor_pc_id), None), "model", None)
+            if isinstance(model, str) and model.strip():
+                return model
+        if isinstance(self._settings.openai_dm_model, str) and self._settings.openai_dm_model.strip() and not actor_pc_id:
+            return self._settings.openai_dm_model
+        if isinstance(self._settings.openai_model, str) and self._settings.openai_model.strip():
+            return self._settings.openai_model
+        return None
+
+    def _memory_scope_for_message(
+        self,
+        *,
+        message: Message,
+        actor_pc_id: str | None,
+        kind: str,
+    ) -> tuple[str, str | None, str | None] | None:
+        if kind == "secret":
+            if not actor_pc_id:
+                return None
+            return "pc", None, actor_pc_id
+
+        if message.channel == "broadcast":
+            return "public", None, None
+        if message.channel == "direct":
+            scope_id = message.send_batch_id or message.conversation_id
+            return "direct", scope_id, None
+        return None
+
+    def _normalize_memory_upsert(
+        self,
+        *,
+        item: Any,
+        message: Message,
+        action_type: str,
+        actor_pc_id: str | None,
+        actor_name: str,
+        thread: ForumThread | None,
+    ) -> MemoryEntry | None:
+        if not isinstance(item, dict):
+            return None
+
+        raw_kind = self._clean_str(item.get("kind"))
+        if raw_kind not in self._MEMORY_ALLOWED_KINDS:
+            return None
+
+        scope_data = self._memory_scope_for_message(message=message, actor_pc_id=actor_pc_id, kind=raw_kind)
+        if scope_data is None:
+            return None
+        scope, scope_id, owner_pc_id = scope_data
+
+        summary = self._trim_memory_text(
+            str(item.get("summary") or ""),
+            max_len=max(1, int(self._settings.memory_write_summary_chars)),
+        )
+        content = self._trim_memory_text(
+            str(item.get("content") or ""),
+            max_len=max(1, int(self._settings.memory_write_content_chars)),
+        )
+        if not summary or not content:
+            return None
+
+        importance_raw = item.get("importance")
+        importance = int(importance_raw) if isinstance(importance_raw, (int, float)) else 0
+        importance = max(0, min(10, importance))
+
+        subject_type = self._clean_str(item.get("subject_type"))
+        subject_id = self._clean_str(item.get("subject_id"))
+
+        source_ref_id = message.send_batch_id or message.id
+        thread_title = thread.title if isinstance(thread, ForumThread) else None
+        source_excerpt = self._trim_memory_text(
+            message.content,
+            max_len=max(1, int(self._settings.memory_write_source_excerpt_chars)),
+        )
+        keywords_raw = item.get("keywords")
+        keywords: list[str] = []
+        if isinstance(keywords_raw, list):
+            for value in keywords_raw:
+                if isinstance(value, str) and value.strip():
+                    keywords.append(value.strip())
+        if not keywords:
+            keywords = self._extract_memory_keywords(summary, content, thread_title or "", source_excerpt)
+
+        meta = {
+            "ref_type": "message",
+            "ref_id": source_ref_id,
+            "message_id": message.id,
+            "conversation_id": message.conversation_id,
+            "send_batch_id": message.send_batch_id,
+            "thread_id": message.thread_id,
+            "channel": message.channel,
+            "channel_id": message.conversation_id if message.channel == "broadcast" else None,
+            "thread_title": thread_title,
+            "action_type": action_type,
+            "actor_name": actor_name,
+            "keywords": keywords,
+            "source_excerpt": source_excerpt,
+        }
+        stable_key = "|".join(
+            [
+                scope,
+                scope_id or "",
+                owner_pc_id or "",
+                raw_kind,
+                subject_type or "",
+                subject_id or "",
+                source_ref_id,
+                summary.casefold(),
+            ]
+        )
+        return MemoryEntry(
+            id=str(uuid5(NAMESPACE_URL, stable_key)),
+            scope=scope,
+            scope_id=scope_id,
+            owner_pc_id=owner_pc_id,
+            kind=raw_kind,
+            content=content,
+            summary=summary,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            importance=importance,
+            score=importance,
+            meta=meta,
+        )
+
+    def _deterministic_memory_write_upserts(
+        self,
+        *,
+        message: Message,
+        actor_name: str,
+        thread: ForumThread | None,
+    ) -> list[dict[str, Any]]:
+        excerpt = self._trim_memory_text(
+            message.content,
+            max_len=max(1, int(self._settings.memory_write_content_chars)),
+        )
+        if not excerpt:
+            return []
+
+        thread_title = thread.title if isinstance(thread, ForumThread) else None
+        if message.channel == "broadcast":
+            if thread_title:
+                summary = f"《{thread_title}》新增发言"
+                content = f"{actor_name}在《{thread_title}》提到：{excerpt}"
+            else:
+                summary = f"{actor_name}发布共享信息"
+                content = f"{actor_name}说：{excerpt}"
+            keywords = self._extract_memory_keywords(thread_title or "", actor_name, excerpt)
+            return [
+                {
+                    "kind": "recent_event",
+                    "summary": summary,
+                    "content": content,
+                    "importance": 1,
+                    "keywords": keywords,
+                }
+            ]
+
+        target_pc = next((actor for actor in (message.to or []) if actor.kind == "pc" and actor.id), None)
+        target_name = (target_pc.name if target_pc and target_pc.name else None) or "对方"
+        keywords = self._extract_memory_keywords(actor_name, target_name, excerpt)
+        entry: dict[str, Any] = {
+            "kind": "recent_event",
+            "summary": f"{actor_name}与{target_name}有新的私聊",
+            "content": f"{actor_name}对{target_name}说：{excerpt}",
+            "importance": 1,
+            "keywords": keywords,
+        }
+        if target_pc and target_pc.id:
+            entry["subject_type"] = "pc"
+            entry["subject_id"] = target_pc.id
+        return [entry]
+
+    async def _llm_memory_write_upserts(
+        self,
+        *,
+        actor_pc_id: str | None,
+        actor_name: str,
+        action_type: str,
+        message: Message,
+        thread: ForumThread | None,
+    ) -> list[dict[str, Any]]:
+        if self._settings.demo_fake or self._llm is None:
+            return self._deterministic_memory_write_upserts(message=message, actor_name=actor_name, thread=thread)
+        if not (self._settings.openai_base_url and self._settings.openai_api_key):
+            return self._deterministic_memory_write_upserts(message=message, actor_name=actor_name, thread=thread)
+
+        model = self._select_memory_writer_model(actor_pc_id=actor_pc_id)
+        if not model:
+            return self._deterministic_memory_write_upserts(message=message, actor_name=actor_name, thread=thread)
+
+        if message.channel == "broadcast":
+            scope_hint = "public"
+        else:
+            scope_hint = "direct"
+
+        thread_payload: dict[str, Any] | None = None
+        if isinstance(thread, ForumThread):
+            thread_payload = {
+                "id": thread.id,
+                "channel_id": thread.channel_id,
+                "title": thread.title,
+            }
+
+        messages = render_prompt_messages(
+            "tick_runner.memory_write",
+            {
+                "max_items": str(max(1, int(self._settings.memory_write_max_items))),
+                "summary_max_chars": str(max(1, int(self._settings.memory_write_summary_chars))),
+                "content_max_chars": str(max(1, int(self._settings.memory_write_content_chars))),
+                "action_type": action_type,
+                "scope_hint": scope_hint,
+                "actor_name": actor_name,
+                "message_json": json.dumps(message.model_dump(), ensure_ascii=False),
+                "thread_json": json.dumps(thread_payload, ensure_ascii=False),
+            },
+        )
+        url = openai_chat_completions_url(self._settings.openai_base_url)
+        res = await self._llm.chat(
+            url=url,
+            apikey=self._settings.openai_api_key,
+            model=model,
+            messages=messages,
+            tools=None,
+        )
+
+        parsed = res.get("parsed") if isinstance(res, dict) else None
+        structured: Any | None = None
+        if isinstance(parsed, dict) and parsed.get("kind") == "structured":
+            structured = parsed.get("structured")
+        elif isinstance(parsed, dict) and parsed.get("kind") == "markdown":
+            markdown = parsed.get("markdown")
+            if isinstance(markdown, str):
+                structured = self._try_parse_json_loose(markdown)
+
+        if structured is None:
+            raw = res.get("raw") if isinstance(res, dict) else None
+            parsed_raw = parse_llm_response(raw)
+            if parsed_raw["kind"] == "structured":
+                structured = parsed_raw.get("structured")
+            elif parsed_raw["kind"] == "markdown" and isinstance(parsed_raw.get("markdown"), str):
+                structured = self._try_parse_json_loose(parsed_raw["markdown"])
+
+        if not isinstance(structured, dict):
+            return self._deterministic_memory_write_upserts(message=message, actor_name=actor_name, thread=thread)
+
+        upserts = structured.get("upserts")
+        if not isinstance(upserts, list):
+            return []
+        return [item for item in upserts if isinstance(item, dict)][: max(1, int(self._settings.memory_write_max_items))]
+
+    async def _write_memories_for_message(
+        self,
+        *,
+        action_type: str,
+        actor_pc_id: str | None,
+        actor_name: str,
+        message: Message,
+        thread: ForumThread | None = None,
+    ) -> None:
+        try:
+            raw_upserts = await self._llm_memory_write_upserts(
+                actor_pc_id=actor_pc_id,
+                actor_name=actor_name,
+                action_type=action_type,
+                message=message,
+                thread=thread,
+            )
+            entries: list[MemoryEntry] = []
+            for item in raw_upserts[: max(1, int(self._settings.memory_write_max_items))]:
+                entry = self._normalize_memory_upsert(
+                    item=item,
+                    message=message,
+                    action_type=action_type,
+                    actor_pc_id=actor_pc_id,
+                    actor_name=actor_name,
+                    thread=thread,
+                )
+                if entry is not None:
+                    entries.append(entry)
+            if entries:
+                await self._store.upsert_memories(entries)
+        except Exception:
+            return
+
     async def _recall_reply_memories(
         self,
         *,
@@ -1433,6 +1760,13 @@ class TickRunner:
                     ref_id=msg.id,
                 )
             )
+            await self._write_memories_for_message(
+                action_type="dm_digest_broadcast",
+                actor_pc_id=None,
+                actor_name="DM",
+                message=msg,
+                thread=None,
+            )
             await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
             return [{"kind": "message", "message_id": msg.id}]
 
@@ -1461,6 +1795,13 @@ class TickRunner:
                     ref_type="message",
                     ref_id=msg.id,
                 )
+            )
+            await self._write_memories_for_message(
+                action_type="dm_digest_dm",
+                actor_pc_id=None,
+                actor_name="DM",
+                message=msg,
+                thread=None,
             )
             await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
             return [{"kind": "message", "message_id": msg.id}]
@@ -1652,6 +1993,14 @@ class TickRunner:
             )
         )
 
+        await self._write_memories_for_message(
+            action_type="create_thread",
+            actor_pc_id=pc_id,
+            actor_name=pc_name,
+            message=msg,
+            thread=thread,
+        )
+
         await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
         await self._ws.broadcast({"type": "forum_thread", "payload": {"thread": thread.model_dump()}})
 
@@ -1695,6 +2044,14 @@ class TickRunner:
             )
         )
 
+        await self._write_memories_for_message(
+            action_type="reply",
+            actor_pc_id=pc_id,
+            actor_name=pc_name,
+            message=msg,
+            thread=thread,
+        )
+
         await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
         return [{"kind": "message", "message_id": msg.id}, {"kind": "thread", "thread_id": thread.id}]
 
@@ -1734,6 +2091,13 @@ class TickRunner:
                     ref_type="message",
                     ref_id=msg.id,
                 )
+            )
+            await self._write_memories_for_message(
+                action_type="dm",
+                actor_pc_id=pc_id,
+                actor_name=pc_name,
+                message=msg,
+                thread=None,
             )
             await self._ws.broadcast({"type": "message", "payload": msg.model_dump()})
             return [{"kind": "message", "message_id": msg.id}]
@@ -1780,6 +2144,14 @@ class TickRunner:
                 ref_type="message",
                 ref_id=msg_sender.id,
             )
+        )
+
+        await self._write_memories_for_message(
+            action_type="dm",
+            actor_pc_id=pc_id,
+            actor_name=pc_name,
+            message=msg_sender,
+            thread=None,
         )
 
         await self._ws.broadcast({"type": "message", "payload": msg_sender.model_dump()})

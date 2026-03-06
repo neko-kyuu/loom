@@ -64,6 +64,17 @@
     }
   ]
   ,
+  "tick_runner.memory_write": [
+    {
+      "role": "system",
+      "content": "<task>\n你是一个后台记忆整理器。你的任务是根据一条刚产生的新消息，提炼少量可长期复用的记忆条目。\n</task>\n<rules>\n- 只记录消息里明确出现的事实、偏好、关系变化或事件，不要脑补\n- 输出 0~{{max_items}} 条 upserts；宁缺毋滥\n- kind 只能是 autobiography / relationship / recent_event\n- summary 要短，适合检索；content 稍完整但仍要压缩\n- 不要输出 scope，scope 由后端决定\n- 不要输出 Markdown 或解释文字，只输出严格合法 JSON object\n</rules>\n<json_schema>\n{\n  \"upserts\": [\n    {\n      \"kind\": \"recent_event\",\n      \"summary\": \"<= {{summary_max_chars}} chars\",\n      \"content\": \"<= {{content_max_chars}} chars\",\n      \"subject_type\": \"pc|topic\",\n      \"subject_id\": \"optional\",\n      \"importance\": 0,\n      \"keywords\": [\"optional\"]\n    }\n  ]\n}\n</json_schema>"
+    },
+    {
+      "role": "user",
+      "content": "<source>\naction_type={{action_type}}\nscope_hint={{scope_hint}}\nactor_name={{actor_name}}\nmessage_json={{message_json}}\nthread_json={{thread_json}}\n</source>"
+    }
+  ]
+  ,
   "tick_runner.dm_digest_action": [
     {
       "role": "system",
