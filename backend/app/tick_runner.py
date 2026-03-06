@@ -177,12 +177,45 @@ class TickRunner:
                         if round2_errors:
                             tick.error = "; ".join(round2_errors)
                         await self._store.upsert_tick(tick)
+                elif isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "dm_select":
+                    refs, errors = await self._apply_dm_select_round1(
+                        pc_id=pc.id,
+                        pc_name=pc.name,
+                        raw=raw_for_validation,
+                        ctx=ctx,
+                    )
+                    if errors:
+                        tick.error = "; ".join(errors)
+                        await self._store.upsert_tick(tick)
+                        refs = await self._apply_action(
+                            pc_id=pc.id,
+                            action=NoopAction(type="noop", reason="invalid dm_select"),
+                        )
+                    else:
+                        round2_refs, round2_errors = await self._run_dm_write_round2(
+                            pc_id=pc.id,
+                            pc_name=pc.name,
+                            persona=pc.persona,
+                            refs=refs,
+                            ctx=ctx,
+                        )
+                        refs.extend(round2_refs)
+                        if round2_errors:
+                            tick.error = "; ".join(round2_errors)
+                        await self._store.upsert_tick(tick)
                 elif isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "reply":
                     tick.error = "reply is not allowed in round 1; use reply_select"
                     await self._store.upsert_tick(tick)
                     refs = await self._apply_action(
                         pc_id=pc.id,
                         action=NoopAction(type="noop", reason="reply not allowed in round 1"),
+                    )
+                elif isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "dm":
+                    tick.error = "dm is not allowed in round 1; use dm_select"
+                    await self._store.upsert_tick(tick)
+                    refs = await self._apply_action(
+                        pc_id=pc.id,
+                        action=NoopAction(type="noop", reason="dm not allowed in round 1"),
                     )
                 else:
                     action, errors = validate_action(raw_for_validation, ctx=ctx)
@@ -452,6 +485,238 @@ class TickRunner:
                 return j
         return {"type": "noop", "reason": "llm output parse failed"}
 
+    def _pack_dm_message(self, m: Message, *, max_chars: int = 800) -> dict[str, object]:
+        def trim_text(text: str, *, max_len: int) -> str:
+            s = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+            if len(s) > max_len:
+                return s[:max_len] + "…"
+            return s
+
+        return {
+            "id": m.id,
+            "timestamp": m.timestamp,
+            "from": (m.from_actor.name or m.from_actor.kind),
+            "to": [a.name or a.kind for a in (m.to or [])],
+            "content": trim_text(m.content, max_len=max(0, int(max_chars))),
+        }
+
+    async def _build_dm_peer_context(
+        self,
+        *,
+        pc_id: str,
+        peer_kind: str,
+        peer_id: str,
+        recent_n: int = 24,
+        max_chars_per_message: int = 800,
+    ) -> dict[str, object]:
+        conv_id = f"dm_to_{pc_id}"
+        msgs = await self._store.list_messages(conv_id, limit=240)
+
+        def involves_peer(m: Message) -> bool:
+            if peer_kind == "dm":
+                if m.from_actor.kind == "dm":
+                    return True
+                return any(a.kind == "dm" for a in (m.to or []))
+            if m.from_actor.kind == "pc" and m.from_actor.id == peer_id:
+                return True
+            return any(a.kind == "pc" and a.id == peer_id for a in (m.to or []))
+
+        filtered = [m for m in msgs if involves_peer(m)]
+        tail = filtered[-max(0, int(recent_n)) :]
+
+        if peer_kind == "dm":
+            peer_name = "DM"
+        else:
+            peer = next((p for p in self._engine.pcs if p.id == peer_id), None)
+            peer_name = (peer.name if peer else peer_id) or peer_id
+
+        return {
+            "peer": {"kind": peer_kind, "id": peer_id, "name": peer_name},
+            "recent_messages": [self._pack_dm_message(m, max_chars=max_chars_per_message) for m in tail],
+        }
+
+    async def _run_dm_write_round2(
+        self,
+        *,
+        pc_id: str,
+        pc_name: str,
+        persona: str | None,
+        refs: list[dict[str, Any]],
+        ctx: ActionValidationContext,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """
+        Round 2: if Round 1 produced a `dm_select` with `dm_context`, ask the model to write the DM reply
+        and then apply it as a normal `DmAction`.
+        """
+        sel = next((r for r in refs if isinstance(r, dict) and r.get("kind") == "dm_select"), None)
+        if not isinstance(sel, dict):
+            return [], []
+        to_pc_id = self._clean_str(sel.get("to_pc_id"))
+        dm_context = sel.get("dm_context")
+        if to_pc_id and to_pc_id not in ctx.pc_ids:
+            return [], ["dm_write selected pc_id not found"]
+        if not isinstance(dm_context, dict):
+            return [], ["dm_write missing selection context"]
+
+        if self._settings.demo_fake:
+            now = utc_now_iso()
+            raw: dict[str, Any] = {
+                "type": "dm",
+                "content": f"【自动私信】（{now[:19]}）收到，我先跟进一下。",
+            }
+            if to_pc_id:
+                raw["to_pc_id"] = to_pc_id
+        else:
+            raw = await self._llm_dm_write_action(
+                pc_id=pc_id,
+                pc_name=pc_name,
+                persona=persona,
+                selected_target=dict(dm_context.get("peer") or {}),
+                dm_context=dm_context,
+            )
+
+        action, errors = validate_action(raw, ctx=ctx)
+        # Enforce that we only DM the selected target in round 2.
+        if isinstance(action, DmAction):
+            if to_pc_id and action.to_pc_id != to_pc_id:
+                errors = [*errors, "dm_write must dm the selected to_pc_id"]
+                action = NoopAction(type="noop", reason="dm_write mismatch selection")
+            if not to_pc_id and action.to_pc_id is not None:
+                errors = [*errors, "dm_write must omit to_pc_id when selecting DM"]
+                action = NoopAction(type="noop", reason="dm_write mismatch selection")
+
+        applied = await self._apply_action(pc_id=pc_id, action=action)
+        return applied, errors
+
+    async def _apply_dm_select_round1(
+        self,
+        *,
+        pc_id: str,
+        pc_name: str,
+        raw: dict[str, Any],
+        ctx: ActionValidationContext,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """
+        Round 1 only: accept a `dm_select` intermediate output.
+
+        - Valid selection is recorded to pc_activity for recall/debugging.
+        - No DM message is sent in Round 1.
+        """
+        errors: list[str] = []
+
+        to_pc_id = self._clean_str(raw.get("to_pc_id"))
+        selection_reason = self._clean_str(raw.get("selection_reason"))
+        if selection_reason and len(selection_reason) > 120:
+            selection_reason = selection_reason[:120] + "…"
+
+        if to_pc_id:
+            if to_pc_id == pc_id:
+                errors.append("dm_select.to_pc_id must not equal pc_id (cannot dm self)")
+            elif to_pc_id not in ctx.pc_ids:
+                errors.append("dm_select.to_pc_id must be an existing pc id (or omit it for DM)")
+
+        if errors:
+            return [], errors
+
+        if to_pc_id:
+            target = next((p for p in self._engine.pcs if p.id == to_pc_id), None)
+            target_name = target.name if target else to_pc_id
+            reason_part = f"（{selection_reason}）" if selection_reason else ""
+            await self._store.add_pc_activity(
+                PcActivity(
+                    pc_id=pc_id,
+                    kind="dm_selected",
+                    summary=f"{pc_name}：选择私信 {target_name}{reason_part}（等待展开上下文）",
+                    ref_type="pc",
+                    ref_id=to_pc_id,
+                )
+            )
+            dm_context = await self._build_dm_peer_context(pc_id=pc_id, peer_kind="pc", peer_id=to_pc_id)
+            return [{"kind": "dm_select", "to_pc_id": to_pc_id, "dm_context": dm_context}], []
+
+        # default target: DM admin
+        reason_part2 = f"（{selection_reason}）" if selection_reason else ""
+        await self._store.add_pc_activity(
+            PcActivity(
+                pc_id=pc_id,
+                kind="dm_selected",
+                summary=f"{pc_name}：选择私信 DM{reason_part2}（等待展开上下文）",
+                ref_type="pc",
+                ref_id="dm",
+            )
+        )
+        dm_context = await self._build_dm_peer_context(pc_id=pc_id, peer_kind="dm", peer_id="dm")
+        return [{"kind": "dm_select", "to_pc_id": None, "dm_context": dm_context}], []
+
+    async def _llm_dm_write_action(
+        self,
+        *,
+        pc_id: str,
+        pc_name: str,
+        persona: str | None,
+        selected_target: dict[str, Any],
+        dm_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Ask the LLM to write the DM content for the selected target (JSON-only).
+        """
+        if self._llm is None:
+            return {"type": "noop", "reason": "llm not configured"}
+        if not (self._settings.openai_base_url and self._settings.openai_api_key):
+            return {"type": "noop", "reason": "missing openai_base_url/api_key"}
+
+        persona_text = (persona or "").strip() or f"你是{pc_name}。"
+        messages = render_prompt_messages(
+            "tick_runner.dm_write",
+            {
+                "pc_id": pc_id,
+                "pc_name": pc_name,
+                "persona": persona_text,
+                "selected_target_json": json.dumps(selected_target, ensure_ascii=False),
+                "dm_context_json": json.dumps(dm_context, ensure_ascii=False),
+            },
+        )
+
+        model = getattr(next((p for p in self._engine.pcs if p.id == pc_id), None), "model", None)
+        if not isinstance(model, str) or not model.strip():
+            model = self._settings.openai_model
+        if not isinstance(model, str) or not model.strip():
+            return {"type": "noop", "reason": "missing model"}
+
+        url = openai_chat_completions_url(self._settings.openai_base_url)
+        res = await self._llm.chat(
+            url=url,
+            apikey=self._settings.openai_api_key,
+            model=model,
+            messages=messages,
+            tools=None,
+        )
+
+        parsed = res.get("parsed") if isinstance(res, dict) else None
+        if isinstance(parsed, dict) and parsed.get("kind") == "structured":
+            structured = parsed.get("structured")
+            if isinstance(structured, dict):
+                return structured
+            return {"type": "noop", "reason": "llm returned non-object structured output"}
+
+        if isinstance(parsed, dict) and parsed.get("kind") == "markdown":
+            md = parsed.get("markdown")
+            if isinstance(md, str):
+                j = self._try_parse_json_loose(md)
+                if isinstance(j, dict):
+                    return j
+                return {"type": "noop", "reason": "llm returned non-json markdown"}
+
+        raw = res.get("raw") if isinstance(res, dict) else None
+        p2 = parse_llm_response(raw)
+        if p2["kind"] == "structured" and isinstance(p2["structured"], dict):
+            return p2["structured"]
+        if p2["kind"] == "markdown" and isinstance(p2["markdown"], str):
+            j = self._try_parse_json_loose(p2["markdown"])
+            if isinstance(j, dict):
+                return j
+        return {"type": "noop", "reason": "llm output parse failed"}
+
     @staticmethod
     def _summarize_message(m: Message, max_len: int = 200) -> str:
         who = m.from_actor.name or m.from_actor.kind
@@ -508,14 +773,37 @@ class TickRunner:
             recall_new = [x for x in recall_recent if str(x.get("time") or "") >= since]
         recall = {"recent": recall_recent, "new": recall_new}
 
-        # context: inbox digest (DM<->PC)
-        inbox_recent_msgs = await self._store.list_messages(f"dm_to_{pc_id}", limit=80)
-        inbox_recent_lines = [self._summarize_message(m, max_len=800) for m in inbox_recent_msgs[-12:]]
-        inbox_new_msgs = inbox_recent_msgs
-        if since:
-            inbox_new_msgs = [m for m in inbox_recent_msgs if m.timestamp >= since]
-        inbox_new_lines = [self._summarize_message(m, max_len=800) for m in inbox_new_msgs[-12:]]
-        inbox_lines = {"recent": inbox_recent_lines, "new": inbox_new_lines}
+        # context: inbox digest (PC-aggregated)
+        # Show at most one latest DM line per peer PC to keep Round 1 lightweight.
+        inbox_recent_msgs = await self._store.list_messages(f"dm_to_{pc_id}", limit=160)
+        pc_name_by_id = {p.id: p.name for p in self._engine.pcs}
+        latest_by_peer: dict[str, dict[str, Any]] = {}
+        for m in inbox_recent_msgs:
+            peer_id: str | None = None
+            peer_name: str | None = None
+
+            # Only count *received* DMs from other PCs here.
+            if m.from_actor.kind == "pc" and m.from_actor.id != pc_id:
+                peer_id = m.from_actor.id
+                peer_name = pc_name_by_id.get(peer_id) or m.from_actor.name
+
+            if not peer_id or peer_id == pc_id:
+                continue
+
+            prev = latest_by_peer.get(peer_id)
+            if prev is None or str(m.timestamp) >= str(prev.get("_ts") or ""):
+                latest_by_peer[peer_id] = {
+                    "_ts": m.timestamp,
+                    "id": peer_id,
+                    "name": peer_name or peer_id,
+                    "inbox": self._summarize_message(m, max_len=320),
+                }
+
+        inbox_digest = list(latest_by_peer.values())
+        inbox_digest.sort(key=lambda x: str(x.get("_ts") or ""), reverse=True)
+        for it in inbox_digest:
+            it.pop("_ts", None)
+        inbox_digest = inbox_digest[:12]
 
         # context: active threads digest
         convs = await self._store.list_conversations()
@@ -564,7 +852,7 @@ class TickRunner:
                 "pcs_json": json.dumps(pcs, ensure_ascii=False),
                 "forum_channels_json": json.dumps(forum_channels, ensure_ascii=False),
                 "threads_digest_json": json.dumps(threads_digest, ensure_ascii=False),
-                "inbox_digest_json": json.dumps(inbox_lines, ensure_ascii=False),
+                "inbox_digest_json": json.dumps(inbox_digest, ensure_ascii=False),
                 "recall_json": json.dumps(recall, ensure_ascii=False),
             },
         )
@@ -1086,15 +1374,15 @@ class TickRunner:
                 idx = next((i for i, p in enumerate(self._engine.pcs) if p.id == pc_id), 0)
                 target = self._engine.pcs[(idx + 1) % len(self._engine.pcs)]
                 return {
-                    "type": "dm",
+                    "type": "dm_select",
                     "to_pc_id": target.id,
-                    "content": f"【自动私信】{now[:19]} 你方便同步一下进展吗？",
+                    "selection_reason": f"demo_fake: ping {target.name} ({now[:19]})",
                 }
             return {"type": "noop", "reason": "idle"}
 
         if turn_no % 2 == 0:
             now = utc_now_iso()
-            return {"type": "dm", "content": f"【自动私信】{now[:19]} 我准备推进一个小目标。"}
+            return {"type": "dm_select", "selection_reason": f"demo_fake: dm admin ({now[:19]})"}
         return {"type": "noop", "reason": "no_forum_channel"}
 
     async def _apply_action(self, *, pc_id: str, action: CreateThreadAction | ReplyAction | DmAction | NoopAction) -> list[dict[str, Any]]:
