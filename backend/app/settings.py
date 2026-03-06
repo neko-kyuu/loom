@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # Per-actor overrides (optional; can be provided via config.json)
     openai_dm_model: str | None = None
     openai_dm_persona: str = "你是DM（主持人/叙事者）。你负责把用户的话转述给PC们，并补充必要背景；回复简短明确。"
+    openai_memory_model: str | None = None
 
     # Per-PC overrides (optional; defaults live in backend/pc_config/)
     openai_pc_models: dict[str, str | None] = Field(default_factory=dict)
@@ -38,6 +39,7 @@ class Settings(BaseSettings):
     memory_recall_max_items: int = 6
     memory_recall_max_keywords: int = 12
     memory_write_max_items: int = 3
+    memory_write_existing_max_items: int = 6
     memory_write_summary_chars: int = 120
     memory_write_content_chars: int = 400
     memory_write_source_excerpt_chars: int = 200

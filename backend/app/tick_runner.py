@@ -68,7 +68,7 @@ class TickRunner:
         "reply",
         "selected",
     }
-    _MEMORY_ALLOWED_KINDS = {"autobiography", "relationship", "recent_event"}
+    _MEMORY_ALLOWED_KINDS = {"autobiography", "relationship", "recent_event", "secret"}
 
     def __init__(
         self,
@@ -974,6 +974,8 @@ class TickRunner:
         return keywords[:limit]
 
     def _select_memory_writer_model(self, *, actor_pc_id: str | None) -> str | None:
+        if isinstance(self._settings.openai_memory_model, str) and self._settings.openai_memory_model.strip():
+            return self._settings.openai_memory_model
         if actor_pc_id:
             model = getattr(next((p for p in self._engine.pcs if p.id == actor_pc_id), None), "model", None)
             if isinstance(model, str) and model.strip():
@@ -991,7 +993,7 @@ class TickRunner:
         actor_pc_id: str | None,
         kind: str,
     ) -> tuple[str, str | None, str | None] | None:
-        if kind == "secret":
+        if kind in {"autobiography", "relationship", "secret"}:
             if not actor_pc_id:
                 return None
             return "pc", None, actor_pc_id
@@ -1054,6 +1056,7 @@ class TickRunner:
 
         subject_type = self._clean_str(item.get("subject_type"))
         subject_id = self._clean_str(item.get("subject_id"))
+        merge_key = self._clean_str(item.get("merge_key"))
 
         source_ref_id = message.send_batch_id or message.id
         thread_title = thread.title if isinstance(thread, ForumThread) else None
@@ -1069,6 +1072,15 @@ class TickRunner:
                     keywords.append(value.strip())
         if not keywords:
             keywords = self._extract_memory_keywords(summary, content, thread_title or "", source_excerpt)
+        if not merge_key and raw_kind in {"autobiography", "relationship", "secret"}:
+            merge_parts = [raw_kind]
+            if subject_type:
+                merge_parts.append(subject_type)
+            if subject_id:
+                merge_parts.append(subject_id)
+            merge_parts.extend(keywords[:3] if keywords else [summary])
+            merge_key = "_".join(part.strip().casefold().replace(" ", "_") for part in merge_parts if part and part.strip())
+            merge_key = merge_key[:120] if merge_key else None
 
         meta = {
             "ref_type": "message",
@@ -1082,9 +1094,11 @@ class TickRunner:
             "thread_title": thread_title,
             "action_type": action_type,
             "actor_name": actor_name,
+            "merge_key": merge_key,
             "keywords": keywords,
             "source_excerpt": source_excerpt,
         }
+        stable_ref = merge_key or source_ref_id
         stable_key = "|".join(
             [
                 scope,
@@ -1093,8 +1107,8 @@ class TickRunner:
                 raw_kind,
                 subject_type or "",
                 subject_id or "",
-                source_ref_id,
-                summary.casefold(),
+                stable_ref,
+                "" if merge_key else summary.casefold(),
             ]
         )
         return MemoryEntry(
@@ -1160,6 +1174,57 @@ class TickRunner:
             entry["subject_id"] = target_pc.id
         return [entry]
 
+    @staticmethod
+    def _pack_existing_memory_for_write(memory: MemoryEntry) -> dict[str, Any]:
+        merge_key = None
+        if isinstance(memory.meta, dict):
+            raw_merge_key = memory.meta.get("merge_key")
+            if isinstance(raw_merge_key, str) and raw_merge_key.strip():
+                merge_key = raw_merge_key.strip()
+        return {
+            "id": memory.id,
+            "scope": memory.scope,
+            "kind": memory.kind,
+            "summary": memory.summary,
+            "content": memory.content,
+            "subject_type": memory.subject_type,
+            "subject_id": memory.subject_id,
+            "score": memory.score,
+            "merge_key": merge_key,
+        }
+
+    async def _list_existing_memories_for_write(
+        self,
+        *,
+        actor_pc_id: str | None,
+        actor_name: str,
+        message: Message,
+        thread: ForumThread | None,
+    ) -> list[dict[str, Any]]:
+        thread_title = thread.title if isinstance(thread, ForumThread) else ""
+        keywords = self._extract_memory_keywords(actor_name, thread_title, message.content)
+        include_public = message.channel == "broadcast"
+        direct_scope_id: str | None = None
+        if message.channel == "direct":
+            scope_data = self._memory_scope_for_message(message=message, actor_pc_id=actor_pc_id, kind="recent_event")
+            if scope_data is not None:
+                _, direct_scope_id, _ = scope_data
+
+        memories = await self._store.search_memories(
+            keywords=keywords,
+            owner_pc_id=actor_pc_id,
+            include_public=include_public,
+            direct_scope_id=direct_scope_id,
+            limit=max(1, int(self._settings.memory_write_existing_max_items)),
+        )
+        if not memories and actor_pc_id:
+            memories = await self._store.list_memories(
+                scope="pc",
+                owner_pc_id=actor_pc_id,
+                limit=max(1, int(self._settings.memory_write_existing_max_items)),
+            )
+        return [self._pack_existing_memory_for_write(memory) for memory in memories[: max(1, int(self._settings.memory_write_existing_max_items))]]
+
     async def _llm_memory_write_upserts(
         self,
         *,
@@ -1179,9 +1244,9 @@ class TickRunner:
             return self._deterministic_memory_write_upserts(message=message, actor_name=actor_name, thread=thread)
 
         if message.channel == "broadcast":
-            scope_hint = "public"
+            scope_hint = "public + pc"
         else:
-            scope_hint = "direct"
+            scope_hint = "direct + pc"
 
         thread_payload: dict[str, Any] | None = None
         if isinstance(thread, ForumThread):
@@ -1190,6 +1255,12 @@ class TickRunner:
                 "channel_id": thread.channel_id,
                 "title": thread.title,
             }
+        existing_memories = await self._list_existing_memories_for_write(
+            actor_pc_id=actor_pc_id,
+            actor_name=actor_name,
+            message=message,
+            thread=thread,
+        )
 
         messages = render_prompt_messages(
             "tick_runner.memory_write",
@@ -1202,6 +1273,7 @@ class TickRunner:
                 "actor_name": actor_name,
                 "message_json": json.dumps(message.model_dump(), ensure_ascii=False),
                 "thread_json": json.dumps(thread_payload, ensure_ascii=False),
+                "existing_memories_json": json.dumps(existing_memories, ensure_ascii=False),
             },
         )
         url = openai_chat_completions_url(self._settings.openai_base_url)

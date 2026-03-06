@@ -67,11 +67,11 @@
   "tick_runner.memory_write": [
     {
       "role": "system",
-      "content": "<task>\n你是一个后台记忆整理器。你的任务是根据一条刚产生的新消息，提炼少量可长期复用的记忆条目。\n</task>\n<rules>\n- 只记录消息里明确出现的事实、偏好、关系变化或事件，不要脑补\n- 输出 0~{{max_items}} 条 upserts；宁缺毋滥\n- kind 只能是 autobiography / relationship / recent_event\n- summary 要短，适合检索；content 稍完整但仍要压缩\n- 不要输出 scope，scope 由后端决定\n- 不要输出 Markdown 或解释文字，只输出严格合法 JSON object\n</rules>\n<json_schema>\n{\n  \"upserts\": [\n    {\n      \"kind\": \"recent_event\",\n      \"summary\": \"<= {{summary_max_chars}} chars\",\n      \"content\": \"<= {{content_max_chars}} chars\",\n      \"subject_type\": \"pc|topic\",\n      \"subject_id\": \"optional\",\n      \"importance\": 0,\n      \"keywords\": [\"optional\"]\n    }\n  ]\n}\n</json_schema>"
+      "content": "<task>\n你是一个后台记忆整理器。你的任务是根据一条刚产生的新消息，结合已有记忆，提炼少量可长期复用的记忆条目。\n</task>\n<rules>\n- 只记录消息里明确出现的事实、偏好、关系变化或事件，不要脑补\n- 可以利用 <existing_memories> 做合并/改写，避免同主题重复堆积\n- 输出 0~{{max_items}} 条 upserts；宁缺毋滥\n- kind 只能是 autobiography / relationship / recent_event / secret\n- relationship / autobiography / secret 优先给稳定的 merge_key；同主题后续会用它覆盖更新\n- recent_event 一般只在确有值得保留的新事件时写入\n- secret 只在消息明确暴露“角色私密事实/不愿公开的信息/内心隐秘”时写入；模糊暗示不要写\n- summary 要短，适合检索；content 稍完整但仍要压缩\n- 不要输出 scope，scope 由后端决定\n- 不要输出 Markdown 或解释文字，只输出严格合法 JSON object\n</rules>\n<json_schema>\n{\n  \"upserts\": [\n    {\n      \"kind\": \"relationship\",\n      \"merge_key\": \"stable_topic_key\",\n      \"summary\": \"<= {{summary_max_chars}} chars\",\n      \"content\": \"<= {{content_max_chars}} chars\",\n      \"subject_type\": \"pc|topic\",\n      \"subject_id\": \"optional\",\n      \"importance\": 0,\n      \"keywords\": [\"optional\"]\n    }\n  ]\n}\n</json_schema>"
     },
     {
       "role": "user",
-      "content": "<source>\naction_type={{action_type}}\nscope_hint={{scope_hint}}\nactor_name={{actor_name}}\nmessage_json={{message_json}}\nthread_json={{thread_json}}\n</source>"
+      "content": "<source>\naction_type={{action_type}}\nscope_hint={{scope_hint}}\nactor_name={{actor_name}}\nmessage_json={{message_json}}\nthread_json={{thread_json}}\n</source>\n<existing_memories>\n{{existing_memories_json}}\n</existing_memories>"
     }
   ]
   ,
