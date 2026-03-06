@@ -912,6 +912,48 @@ class SqliteStore:
             )
             await db.commit()
 
+    async def decay_memories(self, *, k: int = 1, threshold: int = -3) -> dict[str, int]:
+        decay_k = max(0, int(k))
+        delete_threshold = int(threshold)
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+
+            cur = await db.execute(
+                "SELECT COUNT(1) AS c FROM memories WHERE kind != 'autobiography'"
+            )
+            row = await cur.fetchone()
+            candidates = int(row["c"] if row else 0)
+
+            decayed = 0
+            if decay_k > 0 and candidates > 0:
+                cur = await db.execute(
+                    "UPDATE memories SET score=score-?, updated_at=? WHERE kind != 'autobiography'",
+                    (decay_k, self._utc_now_iso()),
+                )
+                decayed = int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else candidates)
+
+            cur = await db.execute(
+                "DELETE FROM memories WHERE kind != 'autobiography' AND score < ?",
+                (delete_threshold,),
+            )
+            deleted = int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0)
+
+            cur = await db.execute("SELECT COUNT(1) AS c FROM memories")
+            row = await cur.fetchone()
+            remaining = int(row["c"] if row else 0)
+
+            await db.commit()
+
+        return {
+            "candidates": candidates,
+            "decayed": decayed,
+            "deleted": deleted,
+            "remaining": remaining,
+            "k": decay_k,
+            "threshold": delete_threshold,
+        }
+
     @staticmethod
     def _memory_from_row(row: aiosqlite.Row) -> MemoryEntry:
         return MemoryEntry(

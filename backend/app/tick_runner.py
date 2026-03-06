@@ -22,7 +22,7 @@ from .actions import (
 from .db import SqliteStore
 from .engine import DemoEngine
 from .llm import LlmService, openai_chat_completions_url, parse_llm_response
-from .models import Actor, ForumThread, MemoryEntry, Message, PcActivity, TickRecord, utc_now_iso
+from .models import Actor, Event, ForumThread, MemoryEntry, Message, PcActivity, TickRecord, utc_now_iso
 from .settings import Settings
 from .ws import ConnectionManager
 
@@ -275,7 +275,30 @@ class TickRunner:
                 state.last_turn_by_pc[pc.id] = tick.started_at
                 await self._save_state(state)
 
+            await self._maybe_run_memory_decay(turn_no=state.turn_no)
             await self._run_dm_digest_if_due()
+
+    async def _maybe_run_memory_decay(self, *, turn_no: int) -> None:
+        interval = max(0, int(self._settings.memory_decay_interval_ticks))
+        if interval <= 0 or turn_no <= 0 or (turn_no % interval) != 0:
+            return
+
+        stats = await self._store.decay_memories(
+            k=self._settings.memory_decay_k,
+            threshold=self._settings.memory_decay_threshold,
+        )
+        await self._store.add_event(
+            Event(
+                pc_id=None,
+                type="memory_decay",
+                summary=(
+                    f"memory decay at turn {turn_no}: decayed={stats['decayed']}, "
+                    f"deleted={stats['deleted']}, remaining={stats['remaining']}"
+                ),
+                visibility="private",
+                consequences={"turn_no": turn_no, **stats},
+            )
+        )
 
     @staticmethod
     def _parse_iso_utc_loose(s: str) -> datetime | None:

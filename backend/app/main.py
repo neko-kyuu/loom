@@ -17,7 +17,7 @@ from .db import SqliteStore
 from .demo_forum import DemoForumSeedConfig, build_demo_forum_seed
 from .engine import DemoEngine, ForumChannel
 from .llm import LlmService
-from .models import Actor, Message, WsClientToServer
+from .models import Actor, Event, Message, WsClientToServer
 from .state import build_state_message
 from .settings import get_settings
 from .tick_runner import TickRunner
@@ -435,6 +435,80 @@ async def get_llm_log(log_id: str) -> dict[str, Any]:
     if not item:
         raise HTTPException(status_code=404, detail="not found")
     return {"item": item}
+
+
+@app.get("/api/memories")
+async def get_memories(
+    scope: str | None = None,
+    owner_pc_id: str | None = None,
+    scope_id: str | None = None,
+    kind: str | None = None,
+    subject_id: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    items = await store.list_memories(
+        scope=scope,
+        owner_pc_id=owner_pc_id,
+        scope_id=scope_id,
+        kind=kind,
+        subject_id=subject_id,
+        limit=limit,
+    )
+    state_raw = await store.get_setting_json("tick_runner_state")
+    turn_no = None
+    if state_raw:
+        try:
+            state_data = json.loads(state_raw)
+        except Exception:  # noqa: BLE001
+            state_data = None
+        if isinstance(state_data, dict) and isinstance(state_data.get("turn_no"), int):
+            turn_no = state_data["turn_no"]
+    return {
+        "items": [item.model_dump() for item in items],
+        "turn_no": turn_no,
+        "decay": {
+            "interval_ticks": settings.memory_decay_interval_ticks,
+            "k": settings.memory_decay_k,
+            "threshold": settings.memory_decay_threshold,
+        },
+    }
+
+
+@app.post("/api/memories/decay")
+async def post_memories_decay(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    k_raw = body.get("k", settings.memory_decay_k)
+    threshold_raw = body.get("threshold", settings.memory_decay_threshold)
+    try:
+        k = int(k_raw)
+        threshold = int(threshold_raw)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid decay params: {e}") from e
+
+    stats = await store.decay_memories(k=k, threshold=threshold)
+
+    state_raw = await store.get_setting_json("tick_runner_state")
+    turn_no = None
+    if state_raw:
+        try:
+            state_data = json.loads(state_raw)
+        except Exception:  # noqa: BLE001
+            state_data = None
+        if isinstance(state_data, dict) and isinstance(state_data.get("turn_no"), int):
+            turn_no = state_data["turn_no"]
+
+    await store.add_event(
+        Event(
+            type="memory_decay_debug",
+            summary=(
+                f"manual memory decay: decayed={stats['decayed']}, "
+                f"deleted={stats['deleted']}, remaining={stats['remaining']}"
+            ),
+            visibility="private",
+            consequences={"turn_no": turn_no, **stats},
+        )
+    )
+    return {"ok": True, "turn_no": turn_no, "stats": stats}
 
 
 async def _send_state(websocket: WebSocket) -> None:

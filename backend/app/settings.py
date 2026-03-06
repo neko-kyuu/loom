@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     memory_write_summary_chars: int = 120
     memory_write_content_chars: int = 400
     memory_write_source_excerpt_chars: int = 200
+    memory_decay_interval_ticks: int = 50
+    memory_decay_k: int = 1
+    memory_decay_threshold: int = -3
 
 
 @lru_cache
