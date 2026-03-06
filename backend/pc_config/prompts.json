@@ -41,11 +41,11 @@
     },
     {
       "role": "user",
-      "content": "<selected_target>\n{{selected_target_json}}\n</selected_target>\n<dm_context>\n{{dm_context_json}}\n</dm_context>"
+      "content": "<selected_target>\n{{selected_target_json}}\n</selected_target>\n<dm_context>\n{{dm_context_json}}\n</dm_context>\n<memories>\n{{memories_json}}\n</memories>"
     },
     {
       "role": "system",
-      "content": "<writing_style>\n私信更强调“清晰、克制、有温度”。\n- 简短明确：先回应对方要点，再给出下一步/问题。\n- 贴近人设：语气符合你的性格，但不要堆砌设定词。\n- 避免复读：不要机械重复对方原句。\n</writing_style>\n<output>\n你必须只输出 1 个 JSON object（dm 或 noop）。禁止输出 Markdown/代码块/解释文字。\nJSON object schema必须符合<hard_constraints>约束\n</output>"
+      "content": "<writing_style>\n私信更强调“清晰、克制、有温度”。\n- 简短明确：先回应对方要点，再给出下一步/问题。\n- 贴近人设：语气符合你的性格，但不要堆砌设定词。\n- 避免复读：不要机械重复对方原句。\n</writing_style>\n<memory_rules>\n- <memories> 只提供与你和当前私信对象相关的少量线索\n- 只吸收当前回复确实需要的点，不要逐条复述记忆\n- 若 <memories> 为空，就仅依据 dm_context 正常回复\n</memory_rules>\n<output>\n你必须只输出 1 个 JSON object（dm 或 noop）。禁止输出 Markdown/代码块/解释文字。\nJSON object schema必须符合<hard_constraints>约束\n</output>"
     }
   ]
   ,

@@ -544,6 +544,15 @@ class TickRunner:
             "content": trim_text(m.content, max_len=max(0, int(max_chars))),
         }
 
+    @staticmethod
+    def _direct_memory_scope_id(*, pc_id: str, peer_kind: str, peer_id: str) -> str:
+        if peer_kind == "dm":
+            return f"dm_to_{pc_id}"
+        if peer_kind == "pc":
+            left, right = sorted([pc_id, peer_id])
+            return f"pc_pair:{left}:{right}"
+        return f"direct:{pc_id}:{peer_kind}:{peer_id}"
+
     async def _build_dm_peer_context(
         self,
         *,
@@ -574,8 +583,11 @@ class TickRunner:
             peer = next((p for p in self._engine.pcs if p.id == peer_id), None)
             peer_name = (peer.name if peer else peer_id) or peer_id
 
+        scope_id = self._direct_memory_scope_id(pc_id=pc_id, peer_kind=peer_kind, peer_id=peer_id)
+
         return {
-            "peer": {"kind": peer_kind, "id": peer_id, "name": peer_name},
+            "peer": {"kind": peer_kind, "id": peer_id, "name": peer_name, "scope_id": scope_id},
+            "scope_id": scope_id,
             "recent_messages": [self._pack_dm_message(m, max_chars=max_chars_per_message) for m in tail],
         }
 
@@ -709,6 +721,11 @@ class TickRunner:
         if not (self._settings.openai_base_url and self._settings.openai_api_key):
             return {"type": "noop", "reason": "missing openai_base_url/api_key"}
 
+        memories_payload, used_memory_ids = await self._recall_dm_memories(
+            pc_id=pc_id,
+            selected_target=selected_target,
+            dm_context=dm_context,
+        )
         persona_text = (persona or "").strip() or f"你是{pc_name}。"
         messages = render_prompt_messages(
             "tick_runner.dm_write",
@@ -718,8 +735,11 @@ class TickRunner:
                 "persona": persona_text,
                 "selected_target_json": json.dumps(selected_target, ensure_ascii=False),
                 "dm_context_json": json.dumps(dm_context, ensure_ascii=False),
+                "memories_json": json.dumps(memories_payload, ensure_ascii=False),
             },
         )
+        if used_memory_ids:
+            await self._store.touch_memories(used_memory_ids)
 
         model = getattr(next((p for p in self._engine.pcs if p.id == pc_id), None), "model", None)
         if not isinstance(model, str) or not model.strip():
@@ -956,8 +976,20 @@ class TickRunner:
         if message.channel == "broadcast":
             return "public", None, None
         if message.channel == "direct":
-            scope_id = message.send_batch_id or message.conversation_id
-            return "direct", scope_id, None
+            if message.from_actor.kind == "pc" and isinstance(message.from_actor.id, str) and message.from_actor.id.strip():
+                from_pc_id = message.from_actor.id.strip()
+                target_pc = next((actor.id for actor in (message.to or []) if actor.kind == "pc" and actor.id), None)
+                if isinstance(target_pc, str) and target_pc.strip():
+                    return "direct", self._direct_memory_scope_id(pc_id=from_pc_id, peer_kind="pc", peer_id=target_pc.strip()), None
+                if any(actor.kind == "dm" for actor in (message.to or [])):
+                    return "direct", self._direct_memory_scope_id(pc_id=from_pc_id, peer_kind="dm", peer_id="dm"), None
+
+            if message.from_actor.kind == "dm":
+                target_pc = next((actor.id for actor in (message.to or []) if actor.kind == "pc" and actor.id), None)
+                if isinstance(target_pc, str) and target_pc.strip():
+                    return "direct", self._direct_memory_scope_id(pc_id=target_pc.strip(), peer_kind="dm", peer_id="dm"), None
+
+            return "direct", message.conversation_id, None
         return None
 
     def _normalize_memory_upsert(
@@ -1229,6 +1261,48 @@ class TickRunner:
             keywords=keywords,
             owner_pc_id=pc_id,
             include_public=True,
+            limit=max(20, int(self._settings.memory_recall_max_items) * 4),
+        )
+        if not memories:
+            memories = await self._store.list_memories(
+                scope="pc",
+                owner_pc_id=pc_id,
+                kind="autobiography",
+                limit=min(2, max(1, int(self._settings.memory_recall_max_items))),
+            )
+
+        payload, used_ids = self._format_memories_for_prompt(memories)
+        return payload, used_ids
+
+    async def _recall_dm_memories(
+        self,
+        *,
+        pc_id: str,
+        selected_target: dict[str, Any],
+        dm_context: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        scope_id = self._clean_str(dm_context.get("scope_id")) or self._clean_str(selected_target.get("scope_id"))
+        parts: list[str] = []
+
+        target_name = selected_target.get("name")
+        if isinstance(target_name, str):
+            parts.append(target_name)
+
+        recent_messages = dm_context.get("recent_messages")
+        if isinstance(recent_messages, list):
+            for item in recent_messages[-8:]:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+
+        keywords = self._extract_memory_keywords(*parts)
+        memories = await self._store.search_memories(
+            keywords=keywords,
+            owner_pc_id=pc_id,
+            include_public=False,
+            direct_scope_id=scope_id,
             limit=max(20, int(self._settings.memory_recall_max_items) * 4),
         )
         if not memories:
