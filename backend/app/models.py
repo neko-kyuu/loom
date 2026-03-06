@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utc_now_iso() -> str:
@@ -12,6 +12,8 @@ def utc_now_iso() -> str:
 
 
 Channel = Literal["broadcast", "direct"]
+MemoryScope = Literal["pc", "public", "direct"]
+MemoryKind = Literal["autobiography", "relationship", "recent_event", "secret"]
 
 
 class Actor(BaseModel):
@@ -107,6 +109,48 @@ class PcActivity(BaseModel):
     summary: str
     ref_type: str | None = None
     ref_id: str | None = None
+
+
+class MemoryEntry(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    scope: MemoryScope
+    scope_id: str | None = None
+    owner_pc_id: str | None = None
+    kind: MemoryKind
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+    content: str
+    summary: str
+    subject_type: str | None = None
+    subject_id: str | None = None
+    importance: int = 0
+    score: int = 0
+    access_count: int = 0
+    last_accessed_at: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "MemoryEntry":
+        if self.scope == "pc":
+            if not self.owner_pc_id:
+                raise ValueError("owner_pc_id is required when scope='pc'")
+            if self.scope_id:
+                raise ValueError("scope_id must be empty when scope='pc'")
+        elif self.scope == "public":
+            if self.owner_pc_id:
+                raise ValueError("owner_pc_id must be empty when scope='public'")
+            if self.scope_id:
+                raise ValueError("scope_id must be empty when scope='public'")
+        elif self.scope == "direct":
+            if self.owner_pc_id:
+                raise ValueError("owner_pc_id must be empty when scope='direct'")
+            if not self.scope_id:
+                raise ValueError("scope_id is required when scope='direct'")
+
+        if self.kind == "secret" and self.scope != "pc":
+            raise ValueError("secret memories must use scope='pc'")
+
+        return self
 
 
 class WsClientToServer(BaseModel):

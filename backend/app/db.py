@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from collections.abc import Iterable
 
 import aiosqlite
 
-from .models import Conversation, Event, ForumThread, Message, PcActivity, TickRecord
+from .models import Conversation, Event, ForumThread, MemoryEntry, Message, PcActivity, TickRecord
 
 
 SCHEMA_SQL = """
@@ -88,6 +89,46 @@ CREATE TABLE IF NOT EXISTS pc_activity (
 );
 CREATE INDEX IF NOT EXISTS idx_pc_activity_pc_time
   ON pc_activity(pc_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  scope_id TEXT,
+  owner_pc_id TEXT,
+  kind TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  content TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  subject_type TEXT,
+  subject_id TEXT,
+  importance INTEGER NOT NULL DEFAULT 0,
+  score INTEGER NOT NULL DEFAULT 0,
+  access_count INTEGER NOT NULL DEFAULT 0,
+  last_accessed_at TEXT,
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  CHECK (scope IN ('pc', 'public', 'direct')),
+  CHECK (
+    (scope = 'pc' AND owner_pc_id IS NOT NULL AND scope_id IS NULL) OR
+    (scope = 'public' AND owner_pc_id IS NULL AND scope_id IS NULL) OR
+    (scope = 'direct' AND owner_pc_id IS NULL AND scope_id IS NOT NULL)
+  ),
+  CHECK (kind != 'secret' OR scope = 'pc')
+);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_owner_kind_score
+  ON memories(scope, owner_pc_id, kind, score DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_kind_score
+  ON memories(scope, kind, score DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_scope_id_kind_score
+  ON memories(scope, scope_id, kind, score DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_owner_last_accessed
+  ON memories(scope, owner_pc_id, last_accessed_at);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_scope_id_last_accessed
+  ON memories(scope, scope_id, last_accessed_at);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_owner_subject
+  ON memories(scope, owner_pc_id, subject_id);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_scope_id_subject
+  ON memories(scope, scope_id, subject_id);
 
 CREATE TABLE IF NOT EXISTS kv_settings (
   key TEXT PRIMARY KEY,
@@ -685,6 +726,129 @@ class SqliteStore:
         ]
         next_cursor = f"{items[-1]['timestamp']}|{items[-1]['id']}" if len(items) == limit else None
         return items, next_cursor
+
+    async def upsert_memory(self, memory: MemoryEntry) -> None:
+        await self.upsert_memories([memory])
+
+    async def upsert_memories(self, memories: Iterable[MemoryEntry]) -> None:
+        rows = [
+            (
+                memory.id,
+                memory.scope,
+                memory.scope_id,
+                memory.owner_pc_id,
+                memory.kind,
+                memory.created_at,
+                memory.updated_at,
+                memory.content,
+                memory.summary,
+                memory.subject_type,
+                memory.subject_id,
+                memory.importance,
+                memory.score,
+                memory.access_count,
+                memory.last_accessed_at,
+                json.dumps(memory.meta, ensure_ascii=False),
+            )
+            for memory in memories
+        ]
+        if not rows:
+            return
+
+        async with aiosqlite.connect(self._path) as db:
+            await db.executemany(
+                "INSERT INTO memories("
+                "id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
+                "subject_type, subject_id, importance, score, access_count, last_accessed_at, meta_json"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "scope=excluded.scope, scope_id=excluded.scope_id, owner_pc_id=excluded.owner_pc_id, "
+                "kind=excluded.kind, updated_at=excluded.updated_at, content=excluded.content, "
+                "summary=excluded.summary, subject_type=excluded.subject_type, subject_id=excluded.subject_id, "
+                "importance=excluded.importance, score=excluded.score, access_count=excluded.access_count, "
+                "last_accessed_at=excluded.last_accessed_at, meta_json=excluded.meta_json",
+                rows,
+            )
+            await db.commit()
+
+    async def get_memory(self, memory_id: str) -> MemoryEntry | None:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
+                "subject_type, subject_id, importance, score, access_count, last_accessed_at, meta_json "
+                "FROM memories WHERE id=?",
+                (memory_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return self._memory_from_row(row)
+
+    async def list_memories(
+        self,
+        *,
+        scope: str | None = None,
+        owner_pc_id: str | None = None,
+        scope_id: str | None = None,
+        kind: str | None = None,
+        subject_id: str | None = None,
+        limit: int = 200,
+    ) -> list[MemoryEntry]:
+        where: list[str] = []
+        params: list[str | int] = []
+
+        if scope is not None:
+            where.append("scope=?")
+            params.append(scope)
+        if owner_pc_id is not None:
+            where.append("owner_pc_id=?")
+            params.append(owner_pc_id)
+        if scope_id is not None:
+            where.append("scope_id=?")
+            params.append(scope_id)
+        if kind is not None:
+            where.append("kind=?")
+            params.append(kind)
+        if subject_id is not None:
+            where.append("subject_id=?")
+            params.append(subject_id)
+
+        where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
+                "subject_type, subject_id, importance, score, access_count, last_accessed_at, meta_json "
+                "FROM memories"
+                f"{where_sql} "
+                "ORDER BY score DESC, updated_at DESC LIMIT ?",
+                (*params, limit),
+            )
+            rows = await cur.fetchall()
+        return [self._memory_from_row(row) for row in rows]
+
+    @staticmethod
+    def _memory_from_row(row: aiosqlite.Row) -> MemoryEntry:
+        return MemoryEntry(
+            id=row["id"],
+            scope=row["scope"],
+            scope_id=row["scope_id"],
+            owner_pc_id=row["owner_pc_id"],
+            kind=row["kind"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            content=row["content"],
+            summary=row["summary"],
+            subject_type=row["subject_type"],
+            subject_id=row["subject_id"],
+            importance=row["importance"],
+            score=row["score"],
+            access_count=row["access_count"],
+            last_accessed_at=row["last_accessed_at"],
+            meta=json.loads(row["meta_json"] or "{}"),
+        )
 
     async def add_event(self, event: Event) -> None:
         async with aiosqlite.connect(self._path) as db:
