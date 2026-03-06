@@ -1,10 +1,35 @@
-import { Check, Lock, Pencil, Send, Trash2, X } from "lucide-react";
+import { Check, Copy, Lock, Pencil, Send, Trash2, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
 import type { Actor, Message } from "../types";
 import type { ProfilesState } from "../lib/profiles";
 import { chatDisplayName, getProfile } from "../lib/profiles";
 import { absoluteAssetUrl } from "../lib/api";
 import { avatarLabel, formatTime, nameStyleCss } from "../lib/chatUi";
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard-unavailable");
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {}
+
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      return document.execCommand("copy");
+    } finally {
+      document.body.removeChild(ta);
+    }
+  } catch {
+    return false;
+  }
+}
 
 export default function ChatFlow(props: {
   messages: Message[];
@@ -46,8 +71,10 @@ export default function ChatFlow(props: {
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState<string>("");
   const [editingMinHeightPx, setEditingMinHeightPx] = useState<number>(0);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const messagesWrapRef = useRef<HTMLDivElement | null>(null);
   const editTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const copyTimeoutRef = useRef<number | null>(null);
   const directViewerPcId = (props.directViewerPcId || "").trim() || null;
   const pillLabel = composer
     ? composer.pill.isDirect
@@ -82,6 +109,12 @@ export default function ChatFlow(props: {
       document.removeEventListener("mousedown", onDocMouseDown);
     };
   }, [dmPickerOpenFor]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) window.clearTimeout(copyTimeoutRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     const batchId = props.scrollToSendBatchId;
@@ -214,6 +247,25 @@ export default function ChatFlow(props: {
                     </span>
                   ) : null}
                   <div className="time">{formatTime(m.timestamp)}</div>
+                  {!isEditing ? (
+                    <button
+                      type="button"
+                      className="msgActionBtn"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(m.content || "");
+                        if (!ok) return;
+                        setCopiedMessageId(m.id);
+                        if (copyTimeoutRef.current) window.clearTimeout(copyTimeoutRef.current);
+                        copyTimeoutRef.current = window.setTimeout(() => {
+                          setCopiedMessageId((cur) => (cur === m.id ? null : cur));
+                        }, 1200);
+                      }}
+                      aria-label="复制到剪贴板"
+                      title={copiedMessageId === m.id ? "已复制" : "复制"}
+                    >
+                      {copiedMessageId === m.id ? <Check size={12} /> : <Copy size={12} />}
+                    </button>
+                  ) : null}
                   {props.onEditMessage && (m.from_actor.kind === "pc" || m.from_actor.kind === 'dm') && !isEditing ? (
                     <button
                       type="button"
