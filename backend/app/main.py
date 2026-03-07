@@ -12,6 +12,7 @@ from uuid import uuid4
 from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from pydantic import ValidationError
 
 from .db import SqliteStore
 from .demo_forum import DemoForumSeedConfig, build_demo_forum_seed
@@ -445,6 +446,9 @@ async def get_memories(
     kind: str | None = None,
     subject_id: str | None = None,
     pinned: bool | None = None,
+    deleted: bool = False,
+    edit_state: str | None = None,
+    source_type: str | None = None,
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
     items = await store.list_memories(
@@ -454,6 +458,9 @@ async def get_memories(
         kind=kind,
         subject_id=subject_id,
         pinned=pinned,
+        include_deleted=deleted,
+        edit_state=edit_state,
+        source_type=source_type,
         limit=limit,
     )
     state_raw = await store.get_setting_json("tick_runner_state")
@@ -520,6 +527,28 @@ def _assert_manual_memory_kind(kind: str) -> str:
     return normalized
 
 
+def _default_manual_edit_state(kind: str) -> str:
+    if kind in {"autobiography", "secret"}:
+        return "user_locked"
+    if kind == "relationship":
+        return "user_edited"
+    return "normal"
+
+
+def _normalize_memory_patch_text(value: Any, *, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    return text
+
+
+def _revalidate_memory(item: MemoryEntry) -> MemoryEntry:
+    try:
+        return MemoryEntry.model_validate(item.model_dump())
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @app.post("/api/memories")
 async def post_memory(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     owner_pc_id = str(payload.get("owner_pc_id") or "").strip()
@@ -548,6 +577,8 @@ async def post_memory(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         content=content,
         importance=importance,
         score=importance,
+        edit_state=_default_manual_edit_state(kind),
+        source_type="manual",
         pinned=pinned,
         meta={"manual": True, "source": "memory_debugger"},
     )
@@ -562,31 +593,30 @@ async def patch_memory(memory_id: str, payload: dict[str, Any] = Body(...)) -> d
         raise HTTPException(status_code=404, detail="memory not found")
 
     patch = dict(payload)
+    changed_fields: list[str] = []
+
     if "pinned" in patch:
         item.pinned = bool(patch["pinned"])
+        changed_fields.append("pinned")
 
-    editable_fields = {"kind", "summary", "content", "importance", "owner_pc_id"}
+    editable_fields = {"kind", "summary", "content", "importance", "owner_pc_id", "subject_type", "subject_id", "edit_state"}
     if editable_fields.intersection(patch):
-        if item.scope != "pc" or item.kind not in {"autobiography", "secret"}:
-            raise HTTPException(status_code=400, detail="only pc autobiography/secret memories can be edited manually")
-
         if "kind" in patch:
-            item.kind = _assert_manual_memory_kind(str(patch.get("kind") or "").strip())
+            next_kind = str(patch.get("kind") or "").strip()
+            if next_kind not in {"autobiography", "relationship", "recent_event", "secret"}:
+                raise HTTPException(status_code=400, detail="invalid kind")
+            item.kind = next_kind  # type: ignore[assignment]
+            changed_fields.append("kind")
         if "owner_pc_id" in patch:
-            owner_pc_id = str(patch.get("owner_pc_id") or "").strip()
-            if not owner_pc_id:
-                raise HTTPException(status_code=400, detail="owner_pc_id is required")
+            owner_pc_id = str(patch.get("owner_pc_id") or "").strip() or None
             item.owner_pc_id = owner_pc_id
+            changed_fields.append("owner_pc_id")
         if "summary" in patch:
-            summary = str(patch.get("summary") or "").strip()
-            if not summary:
-                raise HTTPException(status_code=400, detail="summary is required")
-            item.summary = summary
+            item.summary = _normalize_memory_patch_text(patch.get("summary"), field_name="summary")
+            changed_fields.append("summary")
         if "content" in patch:
-            content = str(patch.get("content") or "").strip()
-            if not content:
-                raise HTTPException(status_code=400, detail="content is required")
-            item.content = content
+            item.content = _normalize_memory_patch_text(patch.get("content"), field_name="content")
+            changed_fields.append("content")
         if "importance" in patch:
             try:
                 item.importance = max(0, min(10, int(patch.get("importance"))))
@@ -594,14 +624,99 @@ async def patch_memory(memory_id: str, payload: dict[str, Any] = Body(...)) -> d
                 raise HTTPException(status_code=400, detail=f"invalid importance: {e}") from e
             if item.score < item.importance:
                 item.score = item.importance
+            changed_fields.append("importance")
+        if "subject_type" in patch:
+            subject_type = str(patch.get("subject_type") or "").strip() or None
+            item.subject_type = subject_type
+            changed_fields.append("subject_type")
+        if "subject_id" in patch:
+            subject_id = str(patch.get("subject_id") or "").strip() or None
+            item.subject_id = subject_id
+            changed_fields.append("subject_id")
+        if "edit_state" in patch:
+            next_edit_state = str(patch.get("edit_state") or "").strip()
+            if next_edit_state not in {"normal", "user_edited", "user_locked", "deleted"}:
+                raise HTTPException(status_code=400, detail="invalid edit_state")
+            if item.deleted_at and next_edit_state != "deleted":
+                raise HTTPException(status_code=400, detail="restore is not supported yet")
+            item.edit_state = next_edit_state  # type: ignore[assignment]
+            changed_fields.append("edit_state")
 
+    if "scope_id" in patch:
+        raise HTTPException(status_code=400, detail="scope_id is not editable")
+
+    if changed_fields:
+        if "edit_state" not in patch and not item.deleted_at:
+            item.edit_state = _default_manual_edit_state(item.kind)  # type: ignore[assignment]
+        item.revision += 1
+        item.source_type = "manual"
         meta = dict(item.meta or {})
         meta["manual"] = True
         meta["source"] = "memory_debugger"
         item.meta = meta
 
+    if item.edit_state == "deleted" and not item.deleted_at:
+        item.deleted_at = datetime.now(timezone.utc).isoformat()
+
     item.updated_at = datetime.now(timezone.utc).isoformat()
+    item = _revalidate_memory(item)
     await store.upsert_memory(item)
+
+    if changed_fields:
+        await store.add_event(
+            Event(
+                type="memory_manual_edit",
+                summary=f"manual memory edit: {item.summary}",
+                visibility="private",
+                consequences={
+                    "memory_id": item.id,
+                    "scope": item.scope,
+                    "kind": item.kind,
+                    "changed_fields": changed_fields,
+                    "revision": item.revision,
+                    "edit_state": item.edit_state,
+                },
+            )
+        )
+
+    return {"ok": True, "item": item.model_dump()}
+
+
+@app.delete("/api/memories/{memory_id}")
+async def delete_memory(memory_id: str) -> dict[str, Any]:
+    item = await store.get_memory(memory_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="memory not found")
+
+    if item.deleted_at and item.edit_state == "deleted":
+        return {"ok": True, "item": item.model_dump()}
+
+    now = datetime.now(timezone.utc).isoformat()
+    item.deleted_at = now
+    item.edit_state = "deleted"
+    item.updated_at = now
+    item.source_type = "manual"
+    item.revision += 1
+    meta = dict(item.meta or {})
+    meta["manual"] = True
+    meta["source"] = "memory_debugger"
+    item.meta = meta
+    item = _revalidate_memory(item)
+
+    await store.upsert_memory(item)
+    await store.add_event(
+        Event(
+            type="memory_manual_delete",
+            summary=f"manual memory delete: {item.summary}",
+            visibility="private",
+            consequences={
+                "memory_id": item.id,
+                "scope": item.scope,
+                "kind": item.kind,
+                "revision": item.revision,
+            },
+        )
+    )
     return {"ok": True, "item": item.model_dump()}
 
 

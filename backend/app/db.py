@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS memories (
   pinned INTEGER NOT NULL DEFAULT 0,
   access_count INTEGER NOT NULL DEFAULT 0,
   last_accessed_at TEXT,
+  deleted_at TEXT,
+  edit_state TEXT NOT NULL DEFAULT 'normal',
+  source_type TEXT,
+  source_memory_id TEXT,
+  revision INTEGER NOT NULL DEFAULT 0,
   meta_json TEXT NOT NULL DEFAULT '{}',
   CHECK (scope IN ('pc', 'public', 'direct')),
   CHECK (
@@ -130,6 +135,10 @@ CREATE INDEX IF NOT EXISTS idx_memories_scope_owner_subject
   ON memories(scope, owner_pc_id, subject_id);
 CREATE INDEX IF NOT EXISTS idx_memories_scope_scope_id_subject
   ON memories(scope, scope_id, subject_id);
+CREATE INDEX IF NOT EXISTS idx_memories_deleted_at
+  ON memories(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_memories_edit_state
+  ON memories(edit_state);
 
 CREATE TABLE IF NOT EXISTS kv_settings (
   key TEXT PRIMARY KEY,
@@ -176,6 +185,18 @@ class SqliteStore:
         col_names = {r["name"] for r in cols}
         if cols and "pinned" not in col_names:
             await db.execute("ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        if cols and "deleted_at" not in col_names:
+            await db.execute("ALTER TABLE memories ADD COLUMN deleted_at TEXT")
+        if cols and "edit_state" not in col_names:
+            await db.execute("ALTER TABLE memories ADD COLUMN edit_state TEXT NOT NULL DEFAULT 'normal'")
+        if cols and "source_type" not in col_names:
+            await db.execute("ALTER TABLE memories ADD COLUMN source_type TEXT")
+        if cols and "source_memory_id" not in col_names:
+            await db.execute("ALTER TABLE memories ADD COLUMN source_memory_id TEXT")
+        if cols and "revision" not in col_names:
+            await db.execute("ALTER TABLE memories ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_deleted_at ON memories(deleted_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_edit_state ON memories(edit_state)")
 
     async def upsert_conversations(self, conversations: Iterable[Conversation]) -> None:
         rows = [(c.id, c.model_dump_json()) for c in conversations]
@@ -738,43 +759,68 @@ class SqliteStore:
         await self.upsert_memories([memory])
 
     async def upsert_memories(self, memories: Iterable[MemoryEntry]) -> None:
-        rows = [
-            (
-                memory.id,
-                memory.scope,
-                memory.scope_id,
-                memory.owner_pc_id,
-                memory.kind,
-                memory.created_at,
-                memory.updated_at,
-                memory.content,
-                memory.summary,
-                memory.subject_type,
-                memory.subject_id,
-                memory.importance,
-                memory.score,
-                1 if memory.pinned else 0,
-                memory.access_count,
-                memory.last_accessed_at,
-                json.dumps(memory.meta, ensure_ascii=False),
-            )
-            for memory in memories
-        ]
-        if not rows:
+        items = list(memories)
+        if not items:
             return
 
         async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            existing_by_id: dict[str, MemoryEntry] = {}
+            ids = [memory.id for memory in items if isinstance(memory.id, str) and memory.id.strip()]
+            if ids:
+                placeholders = ", ".join("?" for _ in ids)
+                cur = await db.execute(
+                    "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
+                    "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, "
+                    "deleted_at, edit_state, source_type, source_memory_id, revision, meta_json "
+                    f"FROM memories WHERE id IN ({placeholders})",
+                    ids,
+                )
+                rows = await cur.fetchall()
+                existing_by_id = {row["id"]: self._memory_from_row(row) for row in rows}
+
+            merged_items = [self._merge_memory_upsert(existing_by_id.get(memory.id), memory) for memory in items]
+            rows = [
+                (
+                    memory.id,
+                    memory.scope,
+                    memory.scope_id,
+                    memory.owner_pc_id,
+                    memory.kind,
+                    memory.created_at,
+                    memory.updated_at,
+                    memory.content,
+                    memory.summary,
+                    memory.subject_type,
+                    memory.subject_id,
+                    memory.importance,
+                    memory.score,
+                    1 if memory.pinned else 0,
+                    memory.access_count,
+                    memory.last_accessed_at,
+                    memory.deleted_at,
+                    memory.edit_state,
+                    memory.source_type,
+                    memory.source_memory_id,
+                    memory.revision,
+                    json.dumps(memory.meta, ensure_ascii=False),
+                )
+                for memory in merged_items
+            ]
             await db.executemany(
                 "INSERT INTO memories("
                 "id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
-                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, meta_json"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, "
+                "deleted_at, edit_state, source_type, source_memory_id, revision, meta_json"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "scope=excluded.scope, scope_id=excluded.scope_id, owner_pc_id=excluded.owner_pc_id, "
                 "kind=excluded.kind, updated_at=excluded.updated_at, content=excluded.content, "
                 "summary=excluded.summary, subject_type=excluded.subject_type, subject_id=excluded.subject_id, "
                 "importance=excluded.importance, score=excluded.score, pinned=excluded.pinned, access_count=excluded.access_count, "
-                "last_accessed_at=excluded.last_accessed_at, meta_json=excluded.meta_json",
+                "last_accessed_at=excluded.last_accessed_at, deleted_at=excluded.deleted_at, "
+                "edit_state=excluded.edit_state, source_type=excluded.source_type, "
+                "source_memory_id=excluded.source_memory_id, revision=excluded.revision, meta_json=excluded.meta_json",
                 rows,
             )
             await db.commit()
@@ -784,7 +830,8 @@ class SqliteStore:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
-                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, meta_json "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, "
+                "deleted_at, edit_state, source_type, source_memory_id, revision, meta_json "
                 "FROM memories WHERE id=?",
                 (memory_id,),
             )
@@ -802,10 +849,16 @@ class SqliteStore:
         kind: str | None = None,
         subject_id: str | None = None,
         pinned: bool | None = None,
+        include_deleted: bool = False,
+        edit_state: str | None = None,
+        source_type: str | None = None,
         limit: int = 200,
     ) -> list[MemoryEntry]:
         where: list[str] = []
         params: list[str | int] = []
+
+        if not include_deleted:
+            where.append("deleted_at IS NULL")
 
         if scope is not None:
             where.append("scope=?")
@@ -825,6 +878,12 @@ class SqliteStore:
         if pinned is not None:
             where.append("pinned=?")
             params.append(1 if pinned else 0)
+        if edit_state is not None:
+            where.append("edit_state=?")
+            params.append(edit_state)
+        if source_type is not None:
+            where.append("source_type=?")
+            params.append(source_type)
 
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
 
@@ -832,7 +891,8 @@ class SqliteStore:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
-                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, meta_json "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, "
+                "deleted_at, edit_state, source_type, source_memory_id, revision, meta_json "
                 "FROM memories"
                 f"{where_sql} "
                 "ORDER BY score DESC, updated_at DESC LIMIT ?",
@@ -849,6 +909,7 @@ class SqliteStore:
         include_public: bool = False,
         direct_scope_id: str | None = None,
         kind: str | None = None,
+        include_deleted: bool = False,
         limit: int = 200,
     ) -> list[MemoryEntry]:
         cleaned_keywords: list[str] = []
@@ -882,6 +943,8 @@ class SqliteStore:
             return []
 
         where_parts = [f"({' OR '.join(scope_clauses)})"]
+        if not include_deleted:
+            where_parts.append("deleted_at IS NULL")
         params: list[str | int] = list(scope_params)
 
         if kind is not None:
@@ -901,7 +964,8 @@ class SqliteStore:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
-                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, meta_json "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, "
+                "deleted_at, edit_state, source_type, source_memory_id, revision, meta_json "
                 "FROM memories"
                 f"{where_sql} "
                 "ORDER BY score DESC, updated_at DESC LIMIT ?",
@@ -919,7 +983,7 @@ class SqliteStore:
         async with aiosqlite.connect(self._path) as db:
             await db.executemany(
                 "UPDATE memories SET access_count=access_count+1, score=score+1, last_accessed_at=?, updated_at=? "
-                "WHERE id=?",
+                "WHERE id=? AND deleted_at IS NULL",
                 [(now, now, memory_id) for memory_id in ids],
             )
             await db.commit()
@@ -932,26 +996,31 @@ class SqliteStore:
             db.row_factory = aiosqlite.Row
 
             cur = await db.execute(
-                "SELECT COUNT(1) AS c FROM memories WHERE pinned=0 AND kind != 'autobiography'"
+                "SELECT COUNT(1) AS c FROM memories "
+                "WHERE deleted_at IS NULL AND pinned=0 AND kind != 'autobiography'"
             )
             row = await cur.fetchone()
             candidates = int(row["c"] if row else 0)
 
             decayed = 0
             if decay_k > 0 and candidates > 0:
+                now = self._utc_now_iso()
                 cur = await db.execute(
-                    "UPDATE memories SET score=score-?, updated_at=? WHERE pinned=0 AND kind != 'autobiography'",
-                    (decay_k, self._utc_now_iso()),
+                    "UPDATE memories SET score=score-?, updated_at=? "
+                    "WHERE deleted_at IS NULL AND pinned=0 AND kind != 'autobiography'",
+                    (decay_k, now),
                 )
                 decayed = int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else candidates)
 
+            deleted_at = self._utc_now_iso()
             cur = await db.execute(
-                "DELETE FROM memories WHERE pinned=0 AND kind != 'autobiography' AND score < ?",
-                (delete_threshold,),
+                "UPDATE memories SET deleted_at=?, edit_state='deleted', updated_at=? "
+                "WHERE deleted_at IS NULL AND pinned=0 AND kind != 'autobiography' AND score < ?",
+                (deleted_at, deleted_at, delete_threshold),
             )
             deleted = int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0)
 
-            cur = await db.execute("SELECT COUNT(1) AS c FROM memories")
+            cur = await db.execute("SELECT COUNT(1) AS c FROM memories WHERE deleted_at IS NULL")
             row = await cur.fetchone()
             remaining = int(row["c"] if row else 0)
 
@@ -965,6 +1034,57 @@ class SqliteStore:
             "k": decay_k,
             "threshold": delete_threshold,
         }
+
+    @staticmethod
+    def _merge_memory_upsert(existing: MemoryEntry | None, incoming: MemoryEntry) -> MemoryEntry:
+        if existing is None:
+            return incoming
+
+        incoming_source = (incoming.source_type or "").strip()
+        is_auto_write = incoming_source in {"llm_write", "deterministic_write"}
+
+        if is_auto_write and (existing.deleted_at or existing.edit_state == "deleted"):
+            return existing
+
+        if is_auto_write and existing.edit_state == "user_locked":
+            return existing
+
+        if is_auto_write and existing.edit_state == "user_edited":
+            score = max(existing.score, incoming.score)
+            importance = max(existing.importance, incoming.importance)
+            access_count = max(existing.access_count, incoming.access_count)
+            last_accessed_at = incoming.last_accessed_at or existing.last_accessed_at
+            pinned = existing.pinned or incoming.pinned
+            changed = (
+                score != existing.score
+                or importance != existing.importance
+                or access_count != existing.access_count
+                or last_accessed_at != existing.last_accessed_at
+                or pinned != existing.pinned
+            )
+            return existing.model_copy(
+                update={
+                    "score": score,
+                    "importance": importance,
+                    "access_count": access_count,
+                    "last_accessed_at": last_accessed_at,
+                    "pinned": pinned,
+                    "updated_at": incoming.updated_at if changed else existing.updated_at,
+                }
+            )
+
+        next_edit_state = incoming.edit_state
+        if next_edit_state == "normal" and existing.edit_state != "normal":
+            next_edit_state = existing.edit_state
+
+        return incoming.model_copy(
+            update={
+                "deleted_at": incoming.deleted_at if incoming.deleted_at is not None else existing.deleted_at,
+                "edit_state": next_edit_state,
+                "source_memory_id": incoming.source_memory_id or existing.source_memory_id,
+                "revision": max(existing.revision, incoming.revision),
+            }
+        )
 
     @staticmethod
     def _memory_from_row(row: aiosqlite.Row) -> MemoryEntry:
@@ -985,6 +1105,11 @@ class SqliteStore:
             pinned=bool(row["pinned"]),
             access_count=row["access_count"],
             last_accessed_at=row["last_accessed_at"],
+            deleted_at=row["deleted_at"],
+            edit_state=row["edit_state"],
+            source_type=row["source_type"],
+            source_memory_id=row["source_memory_id"],
+            revision=row["revision"],
             meta=json.loads(row["meta_json"] or "{}"),
         )
 

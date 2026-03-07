@@ -1057,6 +1057,7 @@ class TickRunner:
         subject_type = self._clean_str(item.get("subject_type"))
         subject_id = self._clean_str(item.get("subject_id"))
         merge_key = self._clean_str(item.get("merge_key"))
+        source_type = self._clean_str(item.get("source_type")) or "llm_write"
 
         source_ref_id = message.send_batch_id or message.id
         thread_title = thread.title if isinstance(thread, ForumThread) else None
@@ -1123,6 +1124,7 @@ class TickRunner:
             subject_id=subject_id,
             importance=importance,
             score=importance,
+            source_type=source_type,
             meta=meta,
         )
 
@@ -1155,6 +1157,7 @@ class TickRunner:
                     "summary": summary,
                     "content": content,
                     "importance": 1,
+                    "source_type": "deterministic_write",
                     "keywords": keywords,
                 }
             ]
@@ -1167,6 +1170,7 @@ class TickRunner:
             "summary": f"{actor_name}与{target_name}有新的私聊",
             "content": f"{actor_name}对{target_name}说：{excerpt}",
             "importance": 1,
+            "source_type": "deterministic_write",
             "keywords": keywords,
         }
         if target_pc and target_pc.id:
@@ -1190,6 +1194,8 @@ class TickRunner:
             "subject_type": memory.subject_type,
             "subject_id": memory.subject_id,
             "score": memory.score,
+            "edit_state": memory.edit_state,
+            "deleted_at": memory.deleted_at,
             "merge_key": merge_key,
         }
 
@@ -1341,7 +1347,27 @@ class TickRunner:
                     entries.append(entry)
             if entries:
                 await self._store.upsert_memories(entries)
-        except Exception:
+        except Exception as exc:
+            try:
+                await self._store.add_event(
+                    Event(
+                        pc_id=actor_pc_id,
+                        type="memory_write_error",
+                        summary=f"memory write failed for {action_type}: {type(exc).__name__}",
+                        visibility="private",
+                        consequences={
+                            "action_type": action_type,
+                            "actor_pc_id": actor_pc_id,
+                            "actor_name": actor_name,
+                            "message_id": message.id,
+                            "conversation_id": message.conversation_id,
+                            "thread_id": message.thread_id,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                )
+            except Exception:
+                pass
             return
 
     async def _recall_reply_memories(

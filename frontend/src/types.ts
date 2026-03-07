@@ -122,6 +122,11 @@ export type MemoryEntry = {
   pinned: boolean;
   access_count: number;
   last_accessed_at?: string | null;
+  deleted_at?: string | null;
+  edit_state: "normal" | "user_edited" | "user_locked" | "deleted";
+  source_type?: string | null;
+  source_memory_id?: string | null;
+  revision: number;
   meta: Record<string, any>;
 };
 

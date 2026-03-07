@@ -14,6 +14,7 @@ def utc_now_iso() -> str:
 Channel = Literal["broadcast", "direct"]
 MemoryScope = Literal["pc", "public", "direct"]
 MemoryKind = Literal["autobiography", "relationship", "recent_event", "secret"]
+MemoryEditState = Literal["normal", "user_edited", "user_locked", "deleted"]
 
 
 class Actor(BaseModel):
@@ -128,6 +129,11 @@ class MemoryEntry(BaseModel):
     pinned: bool = False
     access_count: int = 0
     last_accessed_at: str | None = None
+    deleted_at: str | None = None
+    edit_state: MemoryEditState = "normal"
+    source_type: str | None = None
+    source_memory_id: str | None = None
+    revision: int = 0
     meta: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -150,6 +156,12 @@ class MemoryEntry(BaseModel):
 
         if self.kind == "secret" and self.scope != "pc":
             raise ValueError("secret memories must use scope='pc'")
+
+        if self.deleted_at and self.edit_state != "deleted":
+            self.edit_state = "deleted"
+
+        if self.revision < 0:
+            raise ValueError("revision must be >= 0")
 
         return self
 

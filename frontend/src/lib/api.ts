@@ -90,6 +90,9 @@ export async function getMemories(opts?: {
   kind?: string | null;
   subjectId?: string | null;
   pinned?: boolean | null;
+  deleted?: boolean | null;
+  editState?: string | null;
+  sourceType?: string | null;
   limit?: number;
 }): Promise<MemoryListResponse> {
   const q = new URLSearchParams();
@@ -99,6 +102,9 @@ export async function getMemories(opts?: {
   if (opts?.kind) q.set("kind", opts.kind);
   if (opts?.subjectId) q.set("subject_id", opts.subjectId);
   if (typeof opts?.pinned === "boolean") q.set("pinned", String(opts.pinned));
+  if (typeof opts?.deleted === "boolean") q.set("deleted", String(opts.deleted));
+  if (opts?.editState) q.set("edit_state", opts.editState);
+  if (opts?.sourceType) q.set("source_type", opts.sourceType);
   if (opts?.limit) q.set("limit", String(opts.limit));
   const qs = q.toString();
   return await jsonFetch(`${httpBase()}/api/memories${qs ? `?${qs}` : ""}`);
@@ -124,6 +130,14 @@ export async function createMemory(payload: {
     method: "POST",
     body: JSON.stringify(payload)
   });
+  return res.item;
+}
+
+export async function deleteMemory(memoryId: string): Promise<MemoryEntry> {
+  const res = await jsonFetch<{ ok: true; item: MemoryEntry }>(
+    `${httpBase()}/api/memories/${encodeURIComponent(memoryId)}`,
+    { method: "DELETE" }
+  );
   return res.item;
 }
 
