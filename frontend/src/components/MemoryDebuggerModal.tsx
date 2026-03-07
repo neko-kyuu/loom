@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pin, Plus, RefreshCcw, Save, ShieldAlert, UserSquare2, X } from "lucide-react";
+import { Pin, Plus, RefreshCcw, Save, ShieldAlert, UserSquare2, X, Edit, Trash2, Eraser } from "lucide-react";
 import type { MemoryEntry } from "../types";
 import { createMemory, deleteMemory, getMemories, patchMemory } from "../lib/api";
 import { formatTime } from "../lib/chatUi";
@@ -392,17 +392,19 @@ export default function MemoryDebuggerModal(props: {
           <section className="memoryPane memoryListPane">
             <div className="memoryPaneHead">
               <div className="memoryPaneTitle">浏览</div>
-              <button className="smallBtn" onClick={() => beginCreate("autobiography")}>新建</button>
+              <button className="smallBtn" onClick={() => beginCreate("autobiography")}>
+                <Plus size={14} />
+              </button>
             </div>
             <div className="memoryFilters">
               <select className="customSelect" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)}>
-                <option value="">全部 scope</option>
+                <option value="">全部范围</option>
                 <option value="pc">角色私有</option>
                 <option value="public">公共</option>
                 <option value="direct">私聊</option>
               </select>
               <select className="customSelect" value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}>
-                <option value="">全部 kind</option>
+                <option value="">全部类型</option>
                 {ALL_KINDS.map((kind) => (
                   <option key={kind} value={kind}>{kindLabel(kind)}</option>
                 ))}
@@ -474,7 +476,7 @@ export default function MemoryDebuggerModal(props: {
                     <span>{scopeLabel(item.scope)}</span>
                     {!item.deleted_at ? (
                       <>
-                        <span>·</span>
+                        <span style={{ marginRight: "auto" }}>·</span>
                         <button
                           className="memoryInlineAction"
                           onClick={(e) => {
@@ -483,9 +485,10 @@ export default function MemoryDebuggerModal(props: {
                             startEditingMemory(item);
                           }}
                         >
-                          编辑
+                          <Edit size={14} />
                         </button>
                         <button
+                          style={{ marginRight: "10px" }}
                           className="memoryInlineAction danger"
                           onClick={(e) => {
                             e.preventDefault();
@@ -493,7 +496,7 @@ export default function MemoryDebuggerModal(props: {
                             void removeMemory(item);
                           }}
                         >
-                          删除
+                          <Trash2 size={14} />
                         </button>
                       </>
                     ) : null}
@@ -522,22 +525,29 @@ export default function MemoryDebuggerModal(props: {
               <div className="memoryDetailActions">
                 {panelMode === "view" && selected && !selected.deleted_at ? (
                   <>
-                    <button className="smallBtn" onClick={() => void togglePin(selected)}>
-                      {selected.pinned ? "取消置顶" : "置顶"}
+                    <button 
+                      className="smallBtn" 
+                      onClick={() => void togglePin(selected)}
+                      aria-label={selected.pinned ? "取消 pin" : "pin 记忆"}
+                      title={selected.pinned ? "取消 pin" : "pin"}
+                    >
+                      <Pin size={14} />
                     </button>
-                    <button className="smallBtn" onClick={() => startEditingMemory(selected)}>编辑</button>
-                    <button className="smallBtn danger" onClick={() => void removeMemory(selected)}>删除</button>
+                    <button className="smallBtn" onClick={() => startEditingMemory(selected)}>
+                      <Edit size={14} />
+                    </button>
+                    <button className="smallBtn danger" onClick={() => void removeMemory(selected)}>
+                      <Trash2 size={14} />
+                    </button>
                   </>
                 ) : null}
                 {(panelMode === "edit" || panelMode === "create") ? (
                   <>
                     <button className="smallBtn" onClick={resetDraft}>
-                      <Plus size={14} />
-                      <span>{panelMode === "edit" ? "还原" : "清空"}</span>
+                      <Eraser size={14} />
                     </button>
                     <button className="smallBtn strong" disabled={saving || !canSaveDraft} onClick={() => void saveDraft()}>
                       <Save size={14} />
-                      <span>{draft.id ? "保存修改" : "录入"}</span>
                     </button>
                   </>
                 ) : null}
