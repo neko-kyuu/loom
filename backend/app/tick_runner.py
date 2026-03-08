@@ -1485,7 +1485,7 @@ class TickRunner:
         recall = {"recent": recall_recent, "new": recall_new}
 
         # context: inbox digest (PC-aggregated)
-        # Show at most one latest DM line per peer PC to keep Round 1 lightweight.
+        # Show at most the latest 2 PC↔PC DM lines per peer to keep Round 1 lightweight.
         inbox_recent_msgs = await self._store.list_messages(f"dm_to_{pc_id}", limit=160)
         pc_name_by_id = {p.id: p.name for p in self._engine.pcs}
         latest_by_peer: dict[str, dict[str, Any]] = {}
@@ -1493,22 +1493,35 @@ class TickRunner:
             peer_id: str | None = None
             peer_name: str | None = None
 
-            # Only count *received* DMs from other PCs here.
             if m.from_actor.kind == "pc" and m.from_actor.id != pc_id:
                 peer_id = m.from_actor.id
                 peer_name = pc_name_by_id.get(peer_id) or m.from_actor.name
+            elif m.from_actor.kind == "pc" and m.from_actor.id == pc_id:
+                peer = next((actor for actor in m.to if actor.kind == "pc" and actor.id and actor.id != pc_id), None)
+                if peer is not None:
+                    peer_id = peer.id
+                    peer_name = pc_name_by_id.get(peer_id) or peer.name
 
             if not peer_id or peer_id == pc_id:
                 continue
 
-            prev = latest_by_peer.get(peer_id)
-            if prev is None or str(m.timestamp) >= str(prev.get("_ts") or ""):
-                latest_by_peer[peer_id] = {
+            peer_digest = latest_by_peer.setdefault(
+                peer_id,
+                {
                     "_ts": m.timestamp,
                     "id": peer_id,
                     "name": peer_name or peer_id,
-                    "inbox": self._summarize_message(m, max_len=320),
-                }
+                    "messages": [],
+                },
+            )
+            peer_digest["_ts"] = max(str(peer_digest.get("_ts") or ""), str(m.timestamp))
+            peer_digest["name"] = peer_name or peer_digest.get("name") or peer_id
+
+            messages = peer_digest["messages"]
+            if isinstance(messages, list):
+                messages.append(self._summarize_message(m, max_len=320))
+                if len(messages) > 2:
+                    del messages[:-2]
 
         inbox_digest = list(latest_by_peer.values())
         inbox_digest.sort(key=lambda x: str(x.get("_ts") or ""), reverse=True)

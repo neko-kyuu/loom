@@ -26,7 +26,7 @@
     },
     {
       "role": "user",
-      "content": "<forum_channels>\n当前论坛频道有：\n{{forum_channels_json}}\n</forum_channels>\n<threads_digest>\n当前活跃帖子（按活跃度降序）：\n{{threads_digest_json}}\n</threads_digest>\n<inbox_digest>\n当前收到的私信（按PC聚合，每个PC只显示最新一条）：\n{{inbox_digest_json}}\n</inbox_digest>\n<recall>\n最近做过的行动：\n{{recall_json}}\n</recall>"
+      "content": "<forum_channels>\n当前论坛频道有：\n{{forum_channels_json}}\n</forum_channels>\n<threads_digest>\n当前活跃帖子（按活跃度降序）：\n{{threads_digest_json}}\n</threads_digest>\n<inbox_digest>\n当前与其他PC的私信（按PC聚合，每个PC显示最近2条，可能包含收到/发出的消息）：\n{{inbox_digest_json}}\n</inbox_digest>\n<recall>\n最近做过的行动：\n{{recall_json}}\n</recall>"
     },
     {
       "role": "system",
