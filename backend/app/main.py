@@ -63,7 +63,7 @@ async def _startup() -> None:
 
     if not isinstance(channels_state, dict):
         channels_state = {
-            "broadcast": {"description": "闲聊/广播频道（固定存在，不可删除）", "group": "欢迎"},
+            "broadcast": {"description": "闲聊/广播频道", "group": "欢迎"},
             "forums": [
                 {
                     "id": "forum_rose_banquet_hall", 
@@ -75,6 +75,12 @@ async def _startup() -> None:
                     "id": "forum_guilds_complex", 
                     "title": "# 🏛️ 城市公会建筑群", 
                     "description": "米克斯塔的平民行政中心！调查员公会、制图师公会、炼金行会、商会及其各个子支……这个城市拥有相当先进的公会体制和制度。",
+                    "group": "rp专区",
+                },
+                {
+                    "id": "forum_fruhwen_mansion", 
+                    "title": "# 🏰 弗洛温府邸", 
+                    "description": "位于米克斯塔富恩区，由白大理石砌成的华美庄园。环绕着建筑的是层层叠叠的花园梯台，修剪整齐的常青簇拥着庭院中央的喷泉。伊斯的房间坐落在中心花园的正上方，主殿的顶楼，拥有宽敞的阳台和最好的俯瞰视野。",
                     "group": "rp专区",
                 },
             ]
