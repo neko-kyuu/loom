@@ -6,6 +6,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
+from .prompt_texts import PROMPT_TEXTS
+
 
 _VAR_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 _PROMPTS_PATH = Path(__file__).with_name("prompts.json")
@@ -35,6 +37,9 @@ def render_prompt_messages(template_id: str, vars: Mapping[str, str]) -> list[di
 
     Template format:
       { "some.id": [ {"role": "...", "content": "...{{var}}..."}, ... ] }
+
+    Also supports referencing python constants:
+      { "some.id": [ {"role": "...", "content_var": "SOME_PROMPT_NAME"}, ... ] }
     """
     raw = _load_prompts().get(template_id)
     if not isinstance(raw, list):
@@ -46,12 +51,26 @@ def render_prompt_messages(template_id: str, vars: Mapping[str, str]) -> list[di
             raise ValueError(f"prompt template item must be an object: {template_id}[{i}]")
         role = item.get("role")
         content = item.get("content")
+        content_var = item.get("content_var")
         if not isinstance(role, str) or not role.strip():
             raise ValueError(f"prompt message missing role: {template_id}[{i}]")
-        if not isinstance(content, str):
+
+        if content is not None and content_var is not None:
+            raise ValueError(f"prompt message has both content and content_var: {template_id}[{i}]")
+
+        template: str | None = None
+        if isinstance(content, str):
+            template = content
+        elif isinstance(content_var, str):
+            if content_var not in PROMPT_TEXTS:
+                raise KeyError(f"unknown content_var: {content_var} ({template_id}[{i}])")
+            template = PROMPT_TEXTS[content_var]
+
+        if not isinstance(template, str):
             raise ValueError(f"prompt message missing content: {template_id}[{i}]")
-        msg = dict(item)
-        msg["content"] = _render_text(content, vars)
+
+        msg = {k: v for k, v in item.items() if k != "content_var"}
+        msg["content"] = _render_text(template, vars)
         out.append(msg)
 
     return out
