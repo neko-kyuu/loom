@@ -1,6 +1,10 @@
 # loom (demo v0)
 
 Demo v0 目标见 `plan/demo.md`。
+improve v1 由广播响应 -> 论坛模式
+improve v2 两段式LLM进行回复操作
+improve v3 记忆与遗忘系统
+improve v4 两段式LLM -> agent tool calling loop
 
 ## 结构
 
@@ -28,5 +32,3 @@ npm run dev
 ```
 
 默认前端会连 `ws://localhost:8080/ws`，后端会允许 `http://localhost:5173` 的 CORS。
-
-说明：`npm install` / `uv` 安装依赖会联网下载包（我这边不会自动执行）。
