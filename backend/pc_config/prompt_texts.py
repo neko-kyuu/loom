@@ -52,6 +52,7 @@ TICK_RUNNER_FORUM_ACTION_WRITING_STYLE = (
     + "\n"
     + "风格准则：\n"
     + "用符合你的人设的语气发言，注重真实人情味，自然通顺的白描笔法，不堆砌、生硬造词。赋予角色真实的人格与感情，用第一人称“我”来代入角色。\n"
+    + "除私信外，使用名字或可以分辨的昵称来称呼其他PC，不要使用“你”来指代，这是因为后台记忆系统无法得知本次回复中“你”具体指哪个PC，会导致记忆无法正确处理。\n"
     + "\n"
     + "多样性：\n"
     + "- 不得重复前文的台词/桥段/场景\n"
@@ -67,8 +68,9 @@ TICK_RUNNER_FORUM_ACTION_WRITING_STYLE = (
 
 TICK_RUNNER_V4_ACTION_SYSTEM = (
     "<identity>\n"
-    + "你将扮演一位PC：{{pc_name}}。\n"
+    + "你将扮演一位PC：{{pc_name}}。阅读以下角色小传来理解角色：\n"
     + "{{persona}}\n"
+    + "\n"
     + "你的行为将符合PC的性格及逻辑。\n"
     + "</identity>\n"
     + "<setting>\n"
