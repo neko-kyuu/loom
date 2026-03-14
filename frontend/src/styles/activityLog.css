@@ -116,6 +116,105 @@ html[data-theme="milktea"] .activityOverlay {
   word-break: break-word;
 }
 
+.activityRowHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.activityRowMain {
+  min-width: 0;
+}
+
+.activityRowTitle {
+  font-weight: 900;
+  font-size: 13px;
+}
+
+.activityRowSub {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activityRowSnippet {
+  color: var(--text);
+  opacity: 0.92;
+}
+
+.activityRowError {
+  color: #ff8b8b;
+  font-weight: 900;
+}
+
+.activityAudit {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.auditHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.auditTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 900;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.95;
+}
+
+.auditTools {
+  display: grid;
+  gap: 8px;
+}
+
+.auditTool {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.auditToolName {
+  font-weight: 900;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.auditToolArgs {
+  margin: 6px 0 0 0;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+  opacity: 0.92;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.auditEmpty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .activityEmpty {
   padding: 18px 0;
   color: var(--muted);

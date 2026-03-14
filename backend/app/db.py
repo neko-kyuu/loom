@@ -661,6 +661,63 @@ class SqliteStore:
         out.reverse()
         return out
 
+    async def list_ticks_page(
+        self,
+        *,
+        pc_id: str | None = None,
+        cursor: tuple[str, str] | None = None,
+        limit: int = 50,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """
+        Returns newest-first tick rows for UI infinite scrolling.
+
+        Cursor is keyset-based: (started_at, id) of the last item in the previous page.
+        """
+        import json
+
+        where: list[str] = []
+        params: list[str | int] = []
+
+        if pc_id:
+            where.append("pc_id=?")
+            params.append(pc_id)
+
+        if cursor:
+            cursor_ts, cursor_id = cursor
+            where.append("(started_at < ? OR (started_at = ? AND id < ?))")
+            params.extend([cursor_ts, cursor_ts, cursor_id])
+
+        where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, started_at, pc_id, status, action_json, result_refs_json, duration_ms, error "
+                "FROM ticks"
+                f"{where_sql} "
+                "ORDER BY started_at DESC, id DESC LIMIT ?",
+                (*params, limit),
+            )
+            rows = await cur.fetchall()
+
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            items.append(
+                {
+                    "id": r["id"],
+                    "started_at": r["started_at"],
+                    "pc_id": r["pc_id"],
+                    "status": r["status"],
+                    "action": json.loads(r["action_json"] or "{}"),
+                    "result_refs": json.loads(r["result_refs_json"] or "[]"),
+                    "duration_ms": r["duration_ms"],
+                    "error": r["error"],
+                }
+            )
+
+        next_cursor = f"{items[-1]['started_at']}|{items[-1]['id']}" if len(items) == limit else None
+        return items, next_cursor
+
     async def add_pc_activity(self, activity: PcActivity) -> None:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(

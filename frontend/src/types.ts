@@ -91,6 +91,22 @@ export type PcActivityLogPage = {
   next_cursor: string | null;
 };
 
+export type TickLogItem = {
+  id: string;
+  started_at: string;
+  pc_id: string;
+  status: "running" | "done" | "failed";
+  action: any;
+  result_refs?: any[] | null;
+  duration_ms?: number | null;
+  error?: string | null;
+};
+
+export type TickLogPage = {
+  items: TickLogItem[];
+  next_cursor: string | null;
+};
+
 export type LlmLogMeta = {
   id: string;
   created_at: string;

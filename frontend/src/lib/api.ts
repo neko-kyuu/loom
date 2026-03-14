@@ -1,4 +1,12 @@
-import type { ForumThread, LlmLogItem, LlmLogMeta, MemoryEntry, MemoryListResponse, PcActivityLogPage } from "../types";
+import type {
+  ForumThread,
+  LlmLogItem,
+  LlmLogMeta,
+  MemoryEntry,
+  MemoryListResponse,
+  PcActivityLogPage,
+  TickLogPage
+} from "../types";
 
 const DEFAULT_HTTP_BASE = "http://localhost:8080";
 
@@ -70,6 +78,27 @@ export async function getPcActivityLogs(opts?: {
   if (opts?.limit) q.set("limit", String(opts.limit));
   const qs = q.toString();
   return await jsonFetch(`${httpBase()}/api/pc-activity/logs${qs ? `?${qs}` : ""}`);
+}
+
+export async function getTicks(opts?: {
+  pcId?: string | null;
+  cursor?: string | null;
+  limit?: number;
+}): Promise<TickLogPage> {
+  const q = new URLSearchParams();
+  if (opts?.pcId) q.set("pc_id", opts.pcId);
+  if (opts?.cursor) q.set("cursor", opts.cursor);
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return await jsonFetch(`${httpBase()}/api/ticks${qs ? `?${qs}` : ""}`);
+}
+
+export async function getForumThreads(opts?: { channelId?: string | null; limit?: number }): Promise<{ items: ForumThread[] }> {
+  const q = new URLSearchParams();
+  if (opts?.channelId) q.set("channel_id", opts.channelId);
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return await jsonFetch(`${httpBase()}/api/forum/threads${qs ? `?${qs}` : ""}`);
 }
 
 export async function getLlmLogs(opts?: { limit?: number }): Promise<{ items: LlmLogMeta[] }> {

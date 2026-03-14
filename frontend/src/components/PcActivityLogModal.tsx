@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { X } from "lucide-react";
-import type { LlmLogItem, LlmLogMeta, PcActivityLogItem } from "../types";
+import { ChevronDown, ChevronRight, Wrench, X } from "lucide-react";
+import type { LlmLogItem, LlmLogMeta, TickLogItem } from "../types";
 import { formatTime } from "../lib/chatUi";
-import { getLlmLog, getLlmLogs, getPcActivityLogs } from "../lib/api";
+import { getForumThreads, getLlmLog, getLlmLogs, getSettingsState, getTicks } from "../lib/api";
 import MarkdownLite from "./MarkdownLite";
+import { chatDisplayName, parseProfilesPayload, type ProfilesState } from "../lib/profiles";
+import { parseChannelsStatePayload, type ChannelsState } from "../lib/channels";
+import type { Actor, ForumThread } from "../types";
 
 export default function PcActivityLogModal(props: {
   open: boolean;
@@ -12,11 +15,15 @@ export default function PcActivityLogModal(props: {
 }) {
   const [tab, setTab] = useState<"activity" | "llm">("activity");
 
-  const [items, setItems] = useState<PcActivityLogItem[]>([]);
+  const [items, setItems] = useState<TickLogItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [profilesState, setProfilesState] = useState<ProfilesState>({ byId: {} });
+  const [channelsState, setChannelsState] = useState<ChannelsState>({ broadcast: { description: "" }, forums: [] });
+  const [threadById, setThreadById] = useState<Record<string, ForumThread>>({});
 
   const [llmItems, setLlmItems] = useState<LlmLogMeta[]>([]);
   const [llmLoading, setLlmLoading] = useState(false);
@@ -33,12 +40,12 @@ export default function PcActivityLogModal(props: {
 
   const title = useMemo(() => {
     if (tab === "llm") return "LLM 日志";
-    return pcId ? `活动日志 · ${pcId}` : "活动日志";
+    return pcId ? `行动审计 · ${pcId}` : "行动审计";
   }, [pcId, tab]);
 
   const loadPage = useCallback(
     async (cursor: string | null) => {
-      const page = await getPcActivityLogs({ pcId, cursor, limit: 50 });
+      const page = await getTicks({ pcId, cursor, limit: 50 });
       return page;
     },
     [pcId]
@@ -75,6 +82,7 @@ export default function PcActivityLogModal(props: {
     setNextCursor(null);
     setHasMore(true);
     setError(null);
+    setExpandedId(null);
     setLoading(true);
     void (async () => {
       try {
@@ -89,6 +97,138 @@ export default function PcActivityLogModal(props: {
       }
     })();
   }, [props.open, pcId, tab]);
+
+  useEffect(() => {
+    if (!props.open) return;
+    if (tab !== "activity") return;
+    void (async () => {
+      try {
+        const settings = await getSettingsState();
+        setProfilesState(parseProfilesPayload(settings.profiles_state));
+        const ch = parseChannelsStatePayload(settings.channels_state);
+        setChannelsState(ch ?? { broadcast: { description: "" }, forums: [] });
+      } catch {
+        // ignore: audit UI falls back to ids
+      }
+
+      try {
+        const res = await getForumThreads({ limit: 2000 });
+        const byId: Record<string, ForumThread> = {};
+        for (const t of res.items || []) {
+          if (t && typeof t.id === "string" && t.id.trim()) byId[t.id] = t;
+        }
+        setThreadById(byId);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [props.open, tab]);
+
+  const pcName = useCallback(
+    (id: string) => {
+      const pid = (id || "").trim();
+      if (!pid) return "";
+      const actor: Actor = { kind: pid === "dm" ? "dm" : "pc", id: pid, name: pid === "dm" ? "DM" : pid };
+      return chatDisplayName(profilesState, actor);
+    },
+    [profilesState]
+  );
+
+  const forumTitleById = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of channelsState.forums || []) {
+      if (!f || typeof f.id !== "string") continue;
+      const title = typeof f.title === "string" ? f.title.trim() : "";
+      if (f.id.trim() && title) out[f.id.trim()] = title;
+    }
+    return out;
+  }, [channelsState]);
+
+  const threadLabel = useCallback(
+    (threadId: string) => {
+      const tid = (threadId || "").trim();
+      if (!tid) return "";
+      const t = threadById[tid];
+      if (!t) return `thread=${tid}`;
+      const forumTitle = forumTitleById[(t.channel_id || "").trim()] || (t.channel_id || "").trim() || "#forum";
+      const tt = (t.title || "").trim();
+      return `${forumTitle} · ${tt || tid}`;
+    },
+    [threadById, forumTitleById]
+  );
+
+  const finalAction = useCallback((raw: any): any | null => {
+    if (!raw || typeof raw !== "object") return null;
+    if (raw.action && typeof raw.action === "object") return raw.action;
+    return raw;
+  }, []);
+
+  const toolAudit = useCallback((raw: any): { tools: { name: string; args: any }[] } => {
+    const empty = { tools: [] as { name: string; args: any }[] };
+    if (!raw || typeof raw !== "object") return empty;
+    const audit = (raw as any).audit;
+    if (!audit || typeof audit !== "object") return empty;
+    const tools = (audit as any).tools;
+    if (!Array.isArray(tools)) return empty;
+    const cleaned = tools
+      .map((it: any) => {
+        const name = typeof it?.name === "string" ? it.name : "";
+        const args = it?.args;
+        return name ? { name, args } : null;
+      })
+      .filter(Boolean) as { name: string; args: any }[];
+    return { tools: cleaned };
+  }, []);
+
+  const describeAction = useCallback((act: any): { title: string; detail?: string; snippet?: string } => {
+    if (!act || typeof act !== "object") return { title: "unknown" };
+    const t = typeof act.type === "string" ? act.type : "unknown";
+    if (t === "create_thread") {
+      const title = typeof act.title === "string" ? act.title : "";
+      const channelId = typeof act.channel_id === "string" ? act.channel_id : "";
+      const forumTitle = forumTitleById[channelId] || channelId || "#forum";
+      return { title: "create_thread", detail: title ? `${forumTitle} · ${title}` : forumTitle };
+    }
+    if (t === "reply") {
+      const threadId = typeof act.thread_id === "string" ? act.thread_id : "";
+      const content = typeof act.content === "string" ? act.content.trim() : "";
+      const snippet = content ? content.slice(0, 120) + (content.length > 120 ? "…" : "") : "";
+      const target = threadId ? threadLabel(threadId) : "";
+      return { title: "reply", detail: target || undefined, snippet: snippet || undefined };
+    }
+    if (t === "dm") {
+      const to = typeof act.to_pc_id === "string" ? act.to_pc_id : "";
+      const content = typeof act.content === "string" ? act.content.trim() : "";
+      const snippet = content ? content.slice(0, 120) + (content.length > 120 ? "…" : "") : "";
+      const toName = to ? `@${pcName(to) || to}` : "@DM";
+      return { title: "dm", detail: toName, snippet: snippet || undefined };
+    }
+    if (t === "noop") {
+      const reason = typeof act.reason === "string" ? act.reason.trim() : "";
+      return { title: "noop", detail: reason || undefined };
+    }
+    return { title: t };
+  }, [forumTitleById, pcName, threadLabel]);
+
+  const trimLine = useCallback((raw: any, maxLen: number) => {
+    const text = String(raw ?? "").replace(/\s+/g, " ").trim();
+    if (!text) return "";
+    if (text.length <= maxLen) return text;
+    return text.slice(0, maxLen) + "…";
+  }, []);
+
+  const prettyArgs = useCallback((value: any) => {
+    if (value === null || value === undefined) return "";
+    try {
+      const text = JSON.stringify(value, null, 2);
+      if (text.length <= 2400) return text;
+      return text.slice(0, 2400) + "\n…";
+    } catch {
+      const s = String(value);
+      if (s.length <= 2400) return s;
+      return s.slice(0, 2400) + "…";
+    }
+  }, []);
 
   useEffect(() => {
     if (!props.open) return;
@@ -261,10 +401,73 @@ export default function PcActivityLogModal(props: {
                 <div className="activityList">
                   {items.map((it) => (
                     <div className="activityRow" key={it.id}>
-                      <div className="activityTime" title={it.timestamp}>
-                        {formatTime(it.timestamp)}
+                      <div className="activityTime" title={it.started_at}>
+                        {formatTime(it.started_at)}
                       </div>
-                      <div className="activitySummary">{it.summary}</div>
+                      <div className="activitySummary">
+                        {(() => {
+                          const act = finalAction(it.action);
+                          const audit = toolAudit(it.action);
+                          const desc = describeAction(act);
+                          const isOpen = expandedId === it.id;
+                          const toolsCount = audit.tools.length;
+                          return (
+                            <>
+                              <div className="activityRowHead">
+                                <div className="activityRowMain">
+                                  <div className="activityRowTitle">
+                                    {pcName(it.pc_id) || it.pc_id} · {desc.title}
+                                  </div>
+                                  <div className="activityRowSub">
+                                    {desc.detail ? <span>{desc.detail}</span> : null}
+                                    {desc.snippet ? <span className="activityRowSnippet">{desc.snippet}</span> : null}
+                                    <span>
+                                      {typeof it.duration_ms === "number" ? `${it.duration_ms}ms` : ""}
+                                      {it.status ? ` · ${it.status}` : ""}
+                                      {toolsCount ? ` · tools=${toolsCount}` : " · tools=0"}
+                                    </span>
+                                    {it.error ? (
+                                      <span className="activityRowError">错误：{trimLine(it.error, 360)}</span>
+                                    ) : null}
+                                  </div>
+                                </div>
+
+                                <button
+                                  type="button"
+                                  className="iconBtn iconOnly"
+                                  aria-label={isOpen ? "收起审计" : "展开审计"}
+                                  title={isOpen ? "收起审计" : "展开审计"}
+                                  onClick={() => setExpandedId((cur) => (cur === it.id ? null : it.id))}
+                                >
+                                  {isOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                                </button>
+                              </div>
+
+                              {isOpen ? (
+                                <div className="activityAudit">
+                                  <div className="auditHead">
+                                    <div className="auditTitle">
+                                      <Wrench size={14} /> 工具调用
+                                    </div>
+                                  </div>
+                                  {audit.tools.length ? (
+                                    <div className="auditTools">
+                                      {audit.tools.map((t, idx) => (
+                                        <div className="auditTool" key={`${it.id}:${idx}:${t.name}`}>
+                                          <div className="auditToolName">{t.name}</div>
+                                          <pre className="auditToolArgs">{prettyArgs(t.args)}</pre>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div className="auditEmpty">本次 action 未使用工具。</div>
+                                  )}
+                                </div>
+                              ) : null}
+                            </>
+                          );
+                        })()}
+                      </div>
                     </div>
                   ))}
                 </div>

@@ -367,6 +367,26 @@ async def patch_forum_thread(thread_id: str, payload: dict[str, Any] = Body(...)
     return {"ok": True, "thread": thread.model_dump()}
 
 
+@app.get("/api/forum/threads")
+async def get_forum_threads(
+    channel_id: str | None = None,
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict[str, Any]:
+    convs = await store.list_conversations()
+    forum_ids = [c.id for c in convs if c.kind == "forum"]
+    if channel_id:
+        if channel_id not in forum_ids:
+            raise HTTPException(status_code=404, detail="forum channel not found")
+        forum_ids = [channel_id]
+
+    threads: list[ForumThread] = []
+    for cid in forum_ids:
+        threads.extend(await store.list_forum_threads(cid))
+
+    threads.sort(key=lambda t: (1 if t.pinned else 0, str(t.last_activity_at or ""), str(t.id or "")), reverse=True)
+    return {"items": [t.model_dump() for t in threads[:limit]]}
+
+
 @app.post("/api/assets")
 async def upload_asset(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """
@@ -427,6 +447,23 @@ async def get_pc_activity_logs(
         cursor_tup = (parts[0].strip(), parts[1].strip())
 
     items, next_cursor = await store.list_pc_activity_log_page(pc_id=pc_id, cursor=cursor_tup, limit=limit)
+    return {"items": items, "next_cursor": next_cursor}
+
+
+@app.get("/api/ticks")
+async def get_ticks(
+    pc_id: str | None = None,
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    cursor_tup: tuple[str, str] | None = None
+    if cursor:
+        parts = cursor.split("|", 1)
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            raise HTTPException(status_code=400, detail="bad cursor")
+        cursor_tup = (parts[0].strip(), parts[1].strip())
+
+    items, next_cursor = await store.list_ticks_page(pc_id=pc_id, cursor=cursor_tup, limit=limit)
     return {"items": items, "next_cursor": next_cursor}
 
 

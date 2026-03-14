@@ -1462,10 +1462,13 @@ class TickRunner:
         url = openai_chat_completions_url(self._settings.openai_base_url)
         tools = self._v4_tools()
 
+        tool_audit: list[dict[str, Any]] = []
+
         async def tool_handler(tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
+            tool_audit.append({"name": tool_name, "args": tool_args})
             return await self._v4_execute_tool(pc_id=pc_id, name=tool_name, args=tool_args)
 
-        return await run_tool_calling_loop(
+        final_action = await run_tool_calling_loop(
             llm_chat=self._llm.chat,
             url=url,
             apikey=self._settings.openai_api_key,
@@ -1479,6 +1482,9 @@ class TickRunner:
                 max_total_tool_output_chars=12_000,
             ),
         )
+        if tool_audit:
+            return {"action": final_action, "audit": {"tools": tool_audit}}
+        return final_action
 
     async def _build_dm_digest_context(self, *, since: str, until: str) -> dict[str, Any]:
         pcs = [{"id": p.id, "name": p.name} for p in self._engine.pcs]
