@@ -265,18 +265,24 @@ class TickRunner:
         return s if s else None
 
     def _pack_dm_message(self, m: Message, *, max_chars: int = 800) -> dict[str, object]:
-        def trim_text(text: str, *, max_len: int) -> str:
-            s = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-            if len(s) > max_len:
-                return s[:max_len] + "…"
-            return s
+        max_len = max(0, int(max_chars))
+        full = (m.content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        content_len = len(full)
+        truncated = content_len > max_len
+        content = (full[:max_len] + "…") if truncated else full
+        next_start_char: int | None = max_len if truncated else None
 
         return {
             "id": m.id,
             "timestamp": m.timestamp,
             "from": (m.from_actor.name or m.from_actor.kind),
             "to": [a.name or a.kind for a in (m.to or [])],
-            "content": trim_text(m.content, max_len=max(0, int(max_chars))),
+            "content": content,
+            "content_len": content_len,
+            "content_truncated": truncated,
+            "start_char": 0,
+            "max_chars": max_len,
+            "next_start_char": next_start_char,
         }
 
     @staticmethod
@@ -869,10 +875,28 @@ class TickRunner:
                         "properties": {
                             "thread_id": {"type": "string"},
                             "channel_id": {"type": "string"},
-                            "recent_n": {"type": "integer", "minimum": 1, "maximum": 24, "default": 12},
-                            "max_chars_per_post": {"type": "integer", "minimum": 200, "maximum": 1600, "default": 1200},
+                            "recent_n": {"type": "integer", "minimum": 1, "maximum": 12, "default": 12},
+                            "max_chars_per_post": {"type": "integer", "minimum": 200, "maximum": 700, "default": 700},
                         },
                         "required": ["thread_id", "channel_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "forum_get_post",
+                    "description": "Fetch a specific forum post with optional slicing by start_char to avoid truncation.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "thread_id": {"type": "string"},
+                            "channel_id": {"type": "string"},
+                            "post_id": {"type": "string"},
+                            "start_char": {"type": "integer", "minimum": 0, "default": 0},
+                            "max_chars": {"type": "integer", "minimum": 200, "maximum": 8000, "default": 6000},
+                        },
+                        "required": ["thread_id", "channel_id", "post_id"],
                     },
                 },
             },
@@ -904,10 +928,29 @@ class TickRunner:
                             "pc_id": {"type": "string"},
                             "peer_kind": {"type": "string", "enum": ["pc", "dm"]},
                             "peer_id": {"type": "string"},
-                            "recent_n": {"type": "integer", "minimum": 1, "maximum": 48, "default": 24},
-                            "max_chars_per_message": {"type": "integer", "minimum": 200, "maximum": 1600, "default": 800},
+                            "recent_n": {"type": "integer", "minimum": 1, "maximum": 14, "default": 14},
+                            "max_chars_per_message": {"type": "integer", "minimum": 200, "maximum": 600, "default": 600},
                         },
                         "required": ["pc_id", "peer_kind", "peer_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "dm_get_message",
+                    "description": "Fetch a specific DM message with optional slicing by start_char to avoid truncation.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pc_id": {"type": "string"},
+                            "peer_kind": {"type": "string", "enum": ["pc", "dm"]},
+                            "peer_id": {"type": "string"},
+                            "message_id": {"type": "string"},
+                            "start_char": {"type": "integer", "minimum": 0, "default": 0},
+                            "max_chars": {"type": "integer", "minimum": 200, "maximum": 8000, "default": 6000},
+                        },
+                        "required": ["pc_id", "peer_kind", "peer_id", "message_id"],
                     },
                 },
             },
@@ -1094,25 +1137,118 @@ class TickRunner:
                 recent_n = 12
                 if isinstance(recent_n_raw, (int, float)):
                     recent_n = int(recent_n_raw)
-                recent_n = max(1, min(24, recent_n))
+                recent_n = max(1, min(12, recent_n))
 
                 max_chars_per_post = 1200
                 if isinstance(max_chars_raw, (int, float)):
                     max_chars_per_post = int(max_chars_raw)
                 max_chars_per_post = max(200, min(1600, max_chars_per_post))
-                # Keep tool output bounded even when caller requests a large max_chars.
-                max_chars_per_post = min(900, max_chars_per_post)
+                max_chars_per_post = min(700, max_chars_per_post)
 
-                data = await self._store.get_thread_context(
-                    thread_id=thread_id,
-                    channel_id=channel_id,
-                    recent_n=recent_n,
-                    max_chars_per_post=max_chars_per_post,
-                    op_max_chars=1200,
+                thread = await self._store.get_forum_thread(thread_id)
+                if thread is None or thread.channel_id != channel_id:
+                    return {"ok": False, "error": {"code": "NOT_FOUND", "message": "thread not found"}}
+
+                op = await self._store.get_first_message_by_thread_in_conversation(thread_id=thread.id, conversation_id=channel_id)
+                recent = await self._store.list_messages_by_thread_in_conversation(
+                    thread_id=thread.id,
+                    conversation_id=channel_id,
+                    limit=240,
                 )
-                # Further bound total size to protect llm_logs/message budgets.
-                data = self._v4_compact_thread_context(data)
-                return {"ok": True, "data": data}
+                if op is not None:
+                    recent = [m for m in recent if m.id != op.id]
+                tail = recent[-max(0, int(recent_n)) :]
+
+                def trim_text(text: str, *, max_len: int) -> tuple[str, bool, int]:
+                    s = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+                    full_len = len(s)
+                    if full_len > max_len:
+                        return s[:max_len] + "…", True, full_len
+                    return s, False, full_len
+
+                def pack(m: Message, *, max_len: int) -> dict[str, object]:
+                    content, truncated, content_len = trim_text(m.content, max_len=max_len)
+                    return {
+                        "id": m.id,
+                        "timestamp": m.timestamp,
+                        "from": (m.from_actor.name or m.from_actor.kind),
+                        "content": content,
+                        "content_len": content_len,
+                        "content_truncated": truncated,
+                        "start_char": 0,
+                        "max_chars": max_len,
+                        "next_start_char": max_len if truncated else None,
+                    }
+
+                op_post = pack(op, max_len=900) if op is not None else None
+                recent_posts = [pack(m, max_len=max_chars_per_post) for m in tail]
+                truncated_ids = [p["id"] for p in recent_posts if isinstance(p, dict) and p.get("content_truncated") is True]
+                if isinstance(op_post, dict) and op_post.get("content_truncated") is True:
+                    truncated_ids = [*(truncated_ids or []), op_post.get("id")]
+
+                data: dict[str, object] = {
+                    "thread": {
+                        "thread_id": thread.id,
+                        "channel_id": thread.channel_id,
+                        "title": thread.title,
+                        "reply_count": thread.reply_count,
+                        "last_activity_at": thread.last_activity_at,
+                        "pinned": thread.pinned,
+                        "locked": thread.locked,
+                    },
+                    "op_post": op_post,
+                    "recent_posts": recent_posts,
+                }
+                meta = {"truncated": bool(truncated_ids), "truncated_post_ids": [tid for tid in truncated_ids if isinstance(tid, str)]}
+                return {"ok": True, "data": data, "meta": meta}
+
+            if name == "forum_get_post":
+                thread_id = self._clean_str(args.get("thread_id"))
+                channel_id = self._clean_str(args.get("channel_id"))
+                post_id = self._clean_str(args.get("post_id"))
+                start_raw = args.get("start_char")
+                max_chars_raw = args.get("max_chars")
+
+                if not thread_id or not channel_id or not post_id:
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "thread_id/channel_id/post_id required"}}
+
+                start_char = 0
+                if isinstance(start_raw, (int, float)):
+                    start_char = int(start_raw)
+                start_char = max(0, start_char)
+
+                max_chars = 6000
+                if isinstance(max_chars_raw, (int, float)):
+                    max_chars = int(max_chars_raw)
+                max_chars = max(200, min(8000, max_chars))
+
+                msg = await self._store.get_message(post_id)
+                if msg is None:
+                    return {"ok": False, "error": {"code": "NOT_FOUND", "message": "post not found"}}
+                if msg.conversation_id != channel_id or msg.thread_id != thread_id:
+                    return {"ok": False, "error": {"code": "SCOPE", "message": "post does not belong to thread/channel"}}
+
+                full = (msg.content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+                content_len = len(full)
+                sliced = full[start_char : start_char + max_chars]
+                truncated = (start_char + max_chars) < content_len
+                content = sliced + ("…" if truncated else "")
+                meta = {
+                    "content_len": content_len,
+                    "content_truncated": truncated,
+                    "start_char": start_char,
+                    "max_chars": max_chars,
+                    "next_start_char": (start_char + max_chars) if truncated else None,
+                }
+                post = {
+                    "id": msg.id,
+                    "timestamp": msg.timestamp,
+                    "from": (msg.from_actor.name or msg.from_actor.kind),
+                    "content": content,
+                    "content_len": content_len,
+                    "content_truncated": truncated,
+                }
+                return {"ok": True, "data": {"post": post}, "meta": meta}
 
             if name == "dm_list_inbox":
                 tool_pc_id = self._clean_str(args.get("pc_id"))
@@ -1168,13 +1304,13 @@ class TickRunner:
                 recent_n = 24
                 if isinstance(recent_n_raw, (int, float)):
                     recent_n = int(recent_n_raw)
-                recent_n = max(1, min(48, recent_n))
+                recent_n = max(1, min(14, recent_n))
 
                 max_chars_per_message = 800
                 if isinstance(max_chars_raw, (int, float)):
                     max_chars_per_message = int(max_chars_raw)
                 max_chars_per_message = max(200, min(1600, max_chars_per_message))
-                max_chars_per_message = min(900, max_chars_per_message)
+                max_chars_per_message = min(600, max_chars_per_message)
 
                 data = await self._build_dm_peer_context(
                     pc_id=pc_id,
@@ -1184,7 +1320,81 @@ class TickRunner:
                     max_chars_per_message=max_chars_per_message,
                 )
                 data = self._v4_compact_dm_context(data)
-                return {"ok": True, "data": data}
+                truncated_ids: list[str] = []
+                recent_messages = data.get("recent_messages")
+                if isinstance(recent_messages, list):
+                    for item in recent_messages:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("content_truncated") is True and isinstance(item.get("id"), str):
+                            truncated_ids.append(item["id"])
+                return {"ok": True, "data": data, "meta": {"truncated": bool(truncated_ids), "truncated_message_ids": truncated_ids}}
+
+            if name == "dm_get_message":
+                tool_pc_id = self._clean_str(args.get("pc_id"))
+                peer_kind = self._clean_str(args.get("peer_kind"))
+                peer_id = self._clean_str(args.get("peer_id"))
+                message_id = self._clean_str(args.get("message_id"))
+                start_raw = args.get("start_char")
+                max_chars_raw = args.get("max_chars")
+
+                if tool_pc_id != pc_id:
+                    return {"ok": False, "error": {"code": "PC_MISMATCH", "message": "pc_id mismatch"}}
+                if peer_kind not in {"pc", "dm"} or not peer_id or not message_id:
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "invalid peer/message"}}
+
+                start_char = 0
+                if isinstance(start_raw, (int, float)):
+                    start_char = int(start_raw)
+                start_char = max(0, start_char)
+
+                max_chars = 6000
+                if isinstance(max_chars_raw, (int, float)):
+                    max_chars = int(max_chars_raw)
+                max_chars = max(200, min(8000, max_chars))
+
+                msg = await self._store.get_message(message_id)
+                if msg is None:
+                    return {"ok": False, "error": {"code": "NOT_FOUND", "message": "message not found"}}
+
+                conv_id = f"dm_to_{pc_id}"
+                if msg.conversation_id != conv_id:
+                    return {"ok": False, "error": {"code": "SCOPE", "message": "message not in this pc inbox"}}
+
+                def involves_peer(m: Message) -> bool:
+                    if peer_kind == "dm":
+                        if m.from_actor.kind == "dm":
+                            return True
+                        return any(a.kind == "dm" for a in (m.to or []))
+                    if m.from_actor.kind == "pc" and m.from_actor.id == peer_id:
+                        return True
+                    return any(a.kind == "pc" and a.id == peer_id for a in (m.to or []))
+
+                if not involves_peer(msg):
+                    return {"ok": False, "error": {"code": "SCOPE", "message": "message not involving this peer"}}
+
+                full = (msg.content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+                content_len = len(full)
+                sliced = full[start_char : start_char + max_chars]
+                truncated = (start_char + max_chars) < content_len
+                content = sliced + ("…" if truncated else "")
+                meta = {
+                    "content_len": content_len,
+                    "content_truncated": truncated,
+                    "start_char": start_char,
+                    "max_chars": max_chars,
+                    "next_start_char": (start_char + max_chars) if truncated else None,
+                }
+                packed = {
+                    "id": msg.id,
+                    "timestamp": msg.timestamp,
+                    "from": (msg.from_actor.name or msg.from_actor.kind),
+                    "to": [a.name or a.kind for a in (msg.to or [])],
+                    "content": content,
+                    "content_len": content_len,
+                    "content_truncated": truncated,
+                }
+                return {"ok": True, "data": {"message": packed}, "meta": meta}
 
             if name == "memory_search":
                 tool_pc_id = self._clean_str(args.get("pc_id"))
@@ -1240,7 +1450,9 @@ class TickRunner:
                 )
 
                 items: list[dict[str, Any]] = []
-                budget_chars = 32_000
+                # Keep memory_search lightweight; the v4 executor has a tight total tool-output budget
+                # shared across all tool calls in this tick.
+                budget_chars = 6_000
                 used_chars = 0
                 omitted = 0
                 for memory in memories:
@@ -1266,8 +1478,6 @@ class TickRunner:
                             "scope": memory.scope,
                             "scope_id": memory.scope_id,
                             "kind": memory.kind,
-                            "subject_id": memory.subject_id,
-                            "score": memory.score,
                             "summary": summary,
                             "content": content,
                             "updated_at": memory.updated_at,
@@ -1477,9 +1687,9 @@ class TickRunner:
             tools=tools,
             tool_handler=tool_handler,
             limits=ToolCallLimits(
-                max_tool_rounds=3,
-                max_tool_calls_per_round=2,
-                max_total_tool_output_chars=12_000,
+                max_tool_rounds=int(getattr(self._settings, "v4_max_tool_rounds", 3) or 3),
+                max_tool_calls_per_round=int(getattr(self._settings, "v4_max_tool_calls_per_round", 2) or 2),
+                max_total_tool_output_chars=int(getattr(self._settings, "v4_max_total_tool_output_chars", 60_000) or 60_000),
             ),
         )
         if tool_audit:

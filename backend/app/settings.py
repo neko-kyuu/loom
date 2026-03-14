@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     memory_decay_k: int = 1
     memory_decay_threshold: int = -3
 
+    # v4 tool-calling executor limits
+    v4_max_tool_rounds: int = 3
+    v4_max_tool_calls_per_round: int = 2
+    # NOTE: This is a char-budget across all tool outputs in one tick.
+    # Keep it large enough to allow memory_search + one context fetch.
+    v4_max_total_tool_output_chars: int = 60_000
+
 
 @lru_cache
 def get_settings() -> Settings:

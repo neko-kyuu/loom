@@ -29,7 +29,7 @@ def try_parse_json_loose(text: str) -> Any | None:
 class ToolCallLimits:
     max_tool_rounds: int = 3
     max_tool_calls_per_round: int = 2
-    max_total_tool_output_chars: int = 12_000
+    max_total_tool_output_chars: int = 1_000_000
 
 
 ToolHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
