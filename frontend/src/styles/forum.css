@@ -13,6 +13,10 @@
   grid-template-columns: 1fr;
 }
 
+.forumShell:not(.detailOnly) .composer{
+  border-bottom-left-radius: 6px;
+}
+
 .threadList {
   min-height: 0;
   overflow: auto;
@@ -142,6 +146,7 @@
 }
 
 .threadDetailHeader {
+  border-top-left-radius: 6px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--panel) 86%, transparent);
