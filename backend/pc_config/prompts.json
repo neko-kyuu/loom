@@ -19,21 +19,6 @@
       "content_var": "ENGINE_PC_REPLY_USER"
     }
   ],
-  "tick_runner.forum_action": [
-    {
-      "role": "system",
-      "content_var": "TICK_RUNNER_FORUM_ACTION_SYSTEM"
-    },
-    {
-      "role": "user",
-      "content_var": "TICK_RUNNER_FORUM_ACTION_USER"
-    },
-    {
-      "role": "system",
-      "content_var": "TICK_RUNNER_FORUM_ACTION_STYLE"
-    }
-  ]
-  ,
   "tick_runner.v4_action": [
     {
       "role": "system",
@@ -46,36 +31,6 @@
     {
       "role": "system",
       "content_var": "TICK_RUNNER_V4_ACTION_STYLE"
-    }
-  ]
-  ,
-  "tick_runner.dm_write": [
-    {
-      "role": "system",
-      "content_var": "TICK_RUNNER_DM_WRITE_SYSTEM"
-    },
-    {
-      "role": "user",
-      "content_var": "TICK_RUNNER_DM_WRITE_USER"
-    },
-    {
-      "role": "system",
-      "content_var": "TICK_RUNNER_DM_WRITE_STYLE"
-    }
-  ]
-  ,
-  "tick_runner.reply_write": [
-    {
-      "role": "system",
-      "content_var": "TICK_RUNNER_REPLY_WRITE_SYSTEM"
-    },
-    {
-      "role": "user",
-      "content_var": "TICK_RUNNER_REPLY_WRITE_USER"
-    },
-    {
-      "role": "system",
-      "content_var": "TICK_RUNNER_REPLY_WRITE_STYLE"
     }
   ]
   ,

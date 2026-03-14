@@ -187,65 +187,11 @@ class TickRunner:
                     raw_for_validation = raw_action["action"]
                 ctx = await self._build_action_context()
                 tick.action = raw_action if isinstance(raw_action, dict) else {"_raw": str(raw_action)}
-
-                if isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "reply_select":
-                    refs, errors = await self._apply_reply_select_round1(
-                        pc_id=pc.id,
-                        pc_name=pc.name,
-                        raw=raw_for_validation,
-                        ctx=ctx,
-                    )
-                    if errors:
-                        tick.error = "; ".join(errors)
-                        await self._store.upsert_tick(tick)
-                        refs = await self._apply_action(
-                            pc_id=pc.id,
-                            action=NoopAction(type="noop", reason="invalid reply_select"),
-                        )
-                    else:
-                        round2_refs, round2_errors = await self._run_reply_write_round2(
-                            pc_id=pc.id,
-                            pc_name=pc.name,
-                            persona=pc.persona,
-                            refs=refs,
-                            ctx=ctx,
-                        )
-                        refs.extend(round2_refs)
-                        if round2_errors:
-                            tick.error = "; ".join(round2_errors)
-                        await self._store.upsert_tick(tick)
-                elif isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "dm_select":
-                    refs, errors = await self._apply_dm_select_round1(
-                        pc_id=pc.id,
-                        pc_name=pc.name,
-                        raw=raw_for_validation,
-                        ctx=ctx,
-                    )
-                    if errors:
-                        tick.error = "; ".join(errors)
-                        await self._store.upsert_tick(tick)
-                        refs = await self._apply_action(
-                            pc_id=pc.id,
-                            action=NoopAction(type="noop", reason="invalid dm_select"),
-                        )
-                    else:
-                        round2_refs, round2_errors = await self._run_dm_write_round2(
-                            pc_id=pc.id,
-                            pc_name=pc.name,
-                            persona=pc.persona,
-                            refs=refs,
-                            ctx=ctx,
-                        )
-                        refs.extend(round2_refs)
-                        if round2_errors:
-                            tick.error = "; ".join(round2_errors)
-                        await self._store.upsert_tick(tick)
-                else:
-                    action, errors = validate_action(raw_for_validation, ctx=ctx)
-                    if errors:
-                        tick.error = "; ".join(errors)
-                    await self._store.upsert_tick(tick)
-                    refs = await self._apply_action(pc_id=pc.id, action=action)
+                action, errors = validate_action(raw_for_validation, ctx=ctx)
+                if errors:
+                    tick.error = "; ".join(errors)
+                await self._store.upsert_tick(tick)
+                refs = await self._apply_action(pc_id=pc.id, action=action)
             except Exception as exc:  # noqa: BLE001
                 tick.status = "failed"
                 tick.error = f"{type(exc).__name__}: {exc}"
@@ -318,227 +264,6 @@ class TickRunner:
         s = v.strip()
         return s if s else None
 
-    async def _run_reply_write_round2(
-        self,
-        *,
-        pc_id: str,
-        pc_name: str,
-        persona: str | None,
-        refs: list[dict[str, Any]],
-        ctx: ActionValidationContext,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """
-        Round 2: if Round 1 produced a `reply_select` with `thread_context`, ask the model to write the reply
-        and then apply it as a normal `ReplyAction`.
-        """
-        sel = next((r for r in refs if isinstance(r, dict) and r.get("kind") == "reply_select"), None)
-        if not isinstance(sel, dict):
-            return [], []
-        channel_id = self._clean_str(sel.get("channel_id"))
-        thread_id = self._clean_str(sel.get("thread_id"))
-        thread_context = sel.get("thread_context")
-        if not channel_id or not thread_id or not isinstance(thread_context, dict):
-            return [], ["reply_write missing selection context"]
-
-        # If the thread got locked between round 1 and now, abort safely.
-        thread = await self._store.get_forum_thread(thread_id)
-        if thread is None or thread.channel_id != channel_id:
-            return [], ["reply_write selected thread not found"]
-        if thread.locked:
-            await self._store.add_pc_activity(
-                PcActivity(
-                    pc_id=pc_id,
-                    kind="reply_blocked",
-                    summary=f"{pc_name}：准备回复但 thread《{thread.title}》已锁定（已跳过）",
-                    ref_type="thread",
-                    ref_id=thread.id,
-                )
-            )
-            return [{"kind": "reply_blocked", "thread_id": thread.id}], []
-
-        if self._settings.demo_fake:
-            now = utc_now_iso()
-            raw: dict[str, Any] = {
-                "type": "reply",
-                "channel_id": channel_id,
-                "thread_id": thread_id,
-                "content": f"【自动行动】我先跟一句（{now[:19]}）。",
-            }
-        else:
-            raw = await self._llm_reply_write_action(
-                pc_id=pc_id,
-                pc_name=pc_name,
-                persona=persona,
-                selected_thread=dict(thread_context.get("thread") or {}),
-                thread_context=thread_context,
-            )
-
-        action, errors = validate_action(raw, ctx=ctx)
-        # Enforce that we only reply to the selected thread in round 2.
-        if isinstance(action, ReplyAction) and (action.channel_id != channel_id or action.thread_id != thread_id):
-            errors = [*errors, "reply_write must reply to the selected thread_id/channel_id"]
-            action = NoopAction(type="noop", reason="reply_write mismatch selection")
-
-        applied = await self._apply_action(pc_id=pc_id, action=action)
-        return applied, errors
-
-    async def _apply_reply_select_round1(
-        self,
-        *,
-        pc_id: str,
-        pc_name: str,
-        raw: dict[str, Any],
-        ctx: ActionValidationContext,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """
-        Round 1 only: accept a `reply_select` intermediate output.
-
-        - Valid selection is recorded to pc_activity for recall/debugging.
-        - No forum message is posted in Round 1.
-        """
-        errors: list[str] = []
-
-        channel_id = self._clean_str(raw.get("channel_id"))
-        thread_id = self._clean_str(raw.get("thread_id"))
-        selection_reason = self._clean_str(raw.get("selection_reason"))
-        if selection_reason and len(selection_reason) > 120:
-            selection_reason = selection_reason[:120] + "…"
-
-        if not channel_id:
-            errors.append("reply_select.channel_id is required")
-        elif channel_id not in ctx.forum_channel_ids:
-            errors.append("reply_select.channel_id must be an existing forum channel id")
-
-        if not thread_id:
-            errors.append("reply_select.thread_id is required")
-        else:
-            ch = ctx.thread_channel_by_id.get(thread_id)
-            if not ch:
-                errors.append("reply_select.thread_id must be an existing thread id")
-            elif channel_id and ch != channel_id:
-                errors.append("reply_select.thread_id must belong to reply_select.channel_id")
-
-        if errors:
-            return [], errors
-
-        thread = await self._store.get_forum_thread(thread_id)
-        if thread is None or thread.channel_id != channel_id:
-            return [], ["reply_select.thread_id must belong to reply_select.channel_id"]
-        if thread.locked:
-            await self._store.add_pc_activity(
-                PcActivity(
-                    pc_id=pc_id,
-                    kind="reply_select_blocked",
-                    summary=f"{pc_name}：选择回复已锁定 thread《{thread.title}》（已跳过）",
-                    ref_type="thread",
-                    ref_id=thread.id,
-                )
-            )
-            return [{"kind": "reply_select_blocked", "thread_id": thread.id}], []
-
-        reason_part = f"（{selection_reason}）" if selection_reason else ""
-        await self._store.add_pc_activity(
-            PcActivity(
-                pc_id=pc_id,
-                kind="reply_selected",
-                summary=f"{pc_name}：选择回复 thread《{thread.title}》{reason_part}（等待展开上下文）",
-                ref_type="thread",
-                ref_id=thread.id,
-            )
-        )
-        thread_ctx = await self._store.get_thread_context(
-            thread_id=thread.id,
-            channel_id=channel_id,
-            recent_n=12,
-            max_chars_per_post=1200,
-            op_max_chars=1600,
-        )
-        return [
-            {
-                "kind": "reply_select",
-                "channel_id": channel_id,
-                "thread_id": thread.id,
-                "thread_context": thread_ctx,
-            }
-        ], []
-
-    async def _llm_reply_write_action(
-        self,
-        *,
-        pc_id: str,
-        pc_name: str,
-        persona: str | None,
-        selected_thread: dict[str, Any],
-        thread_context: dict[str, Any],
-    ) -> dict[str, Any]:
-        """
-        Ask the LLM to write the reply content for the selected thread (JSON-only).
-        """
-        if self._llm is None:
-            return {"type": "noop", "reason": "llm not configured"}
-        if not (self._settings.openai_base_url and self._settings.openai_api_key):
-            return {"type": "noop", "reason": "missing openai_base_url/api_key"}
-
-        memories_payload, used_memory_ids = await self._recall_reply_memories(
-            pc_id=pc_id,
-            selected_thread=selected_thread,
-            thread_context=thread_context,
-        )
-        persona_text = (persona or "").strip() or f"你是{pc_name}。"
-        messages = render_prompt_messages(
-            "tick_runner.reply_write",
-            {
-                "pc_id": pc_id,
-                "pc_name": pc_name,
-                "persona": persona_text,
-                "selected_thread_json": json.dumps(selected_thread, ensure_ascii=False),
-                "thread_context_json": json.dumps(thread_context, ensure_ascii=False),
-                "memories_json": json.dumps(memories_payload, ensure_ascii=False),
-            },
-        )
-        if used_memory_ids:
-            await self._store.touch_memories(used_memory_ids)
-
-        model = getattr(next((p for p in self._engine.pcs if p.id == pc_id), None), "model", None)
-        if not isinstance(model, str) or not model.strip():
-            model = self._settings.openai_model
-        if not isinstance(model, str) or not model.strip():
-            return {"type": "noop", "reason": "missing model"}
-
-        url = openai_chat_completions_url(self._settings.openai_base_url)
-        res = await self._llm.chat(
-            url=url,
-            apikey=self._settings.openai_api_key,
-            model=model,
-            messages=messages,
-            tools=None,
-        )
-
-        parsed = res.get("parsed") if isinstance(res, dict) else None
-        if isinstance(parsed, dict) and parsed.get("kind") == "structured":
-            structured = parsed.get("structured")
-            if isinstance(structured, dict):
-                return structured
-            return {"type": "noop", "reason": "llm returned non-object structured output"}
-
-        if isinstance(parsed, dict) and parsed.get("kind") == "markdown":
-            md = parsed.get("markdown")
-            if isinstance(md, str):
-                j = self._try_parse_json_loose(md)
-                if isinstance(j, dict):
-                    return j
-                return {"type": "noop", "reason": "llm returned non-json markdown"}
-
-        raw = res.get("raw") if isinstance(res, dict) else None
-        p2 = parse_llm_response(raw)
-        if p2["kind"] == "structured" and isinstance(p2["structured"], dict):
-            return p2["structured"]
-        if p2["kind"] == "markdown" and isinstance(p2["markdown"], str):
-            j = self._try_parse_json_loose(p2["markdown"])
-            if isinstance(j, dict):
-                return j
-        return {"type": "noop", "reason": "llm output parse failed"}
-
     def _pack_dm_message(self, m: Message, *, max_chars: int = 800) -> dict[str, object]:
         def trim_text(text: str, *, max_len: int) -> str:
             s = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -601,196 +326,6 @@ class TickRunner:
             "recent_messages": [self._pack_dm_message(m, max_chars=max_chars_per_message) for m in tail],
         }
 
-    async def _run_dm_write_round2(
-        self,
-        *,
-        pc_id: str,
-        pc_name: str,
-        persona: str | None,
-        refs: list[dict[str, Any]],
-        ctx: ActionValidationContext,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """
-        Round 2: if Round 1 produced a `dm_select` with `dm_context`, ask the model to write the DM reply
-        and then apply it as a normal `DmAction`.
-        """
-        sel = next((r for r in refs if isinstance(r, dict) and r.get("kind") == "dm_select"), None)
-        if not isinstance(sel, dict):
-            return [], []
-        to_pc_id = self._clean_str(sel.get("to_pc_id"))
-        dm_context = sel.get("dm_context")
-        if to_pc_id and to_pc_id not in ctx.pc_ids:
-            return [], ["dm_write selected pc_id not found"]
-        if not isinstance(dm_context, dict):
-            return [], ["dm_write missing selection context"]
-
-        if self._settings.demo_fake:
-            now = utc_now_iso()
-            raw: dict[str, Any] = {
-                "type": "dm",
-                "content": f"【自动私信】（{now[:19]}）收到，我先跟进一下。",
-            }
-            if to_pc_id:
-                raw["to_pc_id"] = to_pc_id
-        else:
-            raw = await self._llm_dm_write_action(
-                pc_id=pc_id,
-                pc_name=pc_name,
-                persona=persona,
-                selected_target=dict(dm_context.get("peer") or {}),
-                dm_context=dm_context,
-            )
-
-        action, errors = validate_action(raw, ctx=ctx)
-        # Enforce that we only DM the selected target in round 2.
-        if isinstance(action, DmAction):
-            if to_pc_id and action.to_pc_id != to_pc_id:
-                errors = [*errors, "dm_write must dm the selected to_pc_id"]
-                action = NoopAction(type="noop", reason="dm_write mismatch selection")
-            if not to_pc_id and action.to_pc_id is not None:
-                errors = [*errors, "dm_write must omit to_pc_id when selecting DM"]
-                action = NoopAction(type="noop", reason="dm_write mismatch selection")
-
-        applied = await self._apply_action(pc_id=pc_id, action=action)
-        return applied, errors
-
-    async def _apply_dm_select_round1(
-        self,
-        *,
-        pc_id: str,
-        pc_name: str,
-        raw: dict[str, Any],
-        ctx: ActionValidationContext,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """
-        Round 1 only: accept a `dm_select` intermediate output.
-
-        - Valid selection is recorded to pc_activity for recall/debugging.
-        - No DM message is sent in Round 1.
-        """
-        errors: list[str] = []
-
-        to_pc_id = self._clean_str(raw.get("to_pc_id"))
-        selection_reason = self._clean_str(raw.get("selection_reason"))
-        if selection_reason and len(selection_reason) > 120:
-            selection_reason = selection_reason[:120] + "…"
-
-        if to_pc_id:
-            if to_pc_id == pc_id:
-                errors.append("dm_select.to_pc_id must not equal pc_id (cannot dm self)")
-            elif to_pc_id not in ctx.pc_ids:
-                errors.append("dm_select.to_pc_id must be an existing pc id (or omit it for DM)")
-
-        if errors:
-            return [], errors
-
-        if to_pc_id:
-            target = next((p for p in self._engine.pcs if p.id == to_pc_id), None)
-            target_name = target.name if target else to_pc_id
-            reason_part = f"（{selection_reason}）" if selection_reason else ""
-            await self._store.add_pc_activity(
-                PcActivity(
-                    pc_id=pc_id,
-                    kind="dm_selected",
-                    summary=f"{pc_name}：选择私信 {target_name}{reason_part}（等待展开上下文）",
-                    ref_type="pc",
-                    ref_id=to_pc_id,
-                )
-            )
-            dm_context = await self._build_dm_peer_context(pc_id=pc_id, peer_kind="pc", peer_id=to_pc_id)
-            return [{"kind": "dm_select", "to_pc_id": to_pc_id, "dm_context": dm_context}], []
-
-        # default target: DM admin
-        reason_part2 = f"（{selection_reason}）" if selection_reason else ""
-        await self._store.add_pc_activity(
-            PcActivity(
-                pc_id=pc_id,
-                kind="dm_selected",
-                summary=f"{pc_name}：选择私信 DM{reason_part2}（等待展开上下文）",
-                ref_type="pc",
-                ref_id="dm",
-            )
-        )
-        dm_context = await self._build_dm_peer_context(pc_id=pc_id, peer_kind="dm", peer_id="dm")
-        return [{"kind": "dm_select", "to_pc_id": None, "dm_context": dm_context}], []
-
-    async def _llm_dm_write_action(
-        self,
-        *,
-        pc_id: str,
-        pc_name: str,
-        persona: str | None,
-        selected_target: dict[str, Any],
-        dm_context: dict[str, Any],
-    ) -> dict[str, Any]:
-        """
-        Ask the LLM to write the DM content for the selected target (JSON-only).
-        """
-        if self._llm is None:
-            return {"type": "noop", "reason": "llm not configured"}
-        if not (self._settings.openai_base_url and self._settings.openai_api_key):
-            return {"type": "noop", "reason": "missing openai_base_url/api_key"}
-
-        memories_payload, used_memory_ids = await self._recall_dm_memories(
-            pc_id=pc_id,
-            selected_target=selected_target,
-            dm_context=dm_context,
-        )
-        persona_text = (persona or "").strip() or f"你是{pc_name}。"
-        messages = render_prompt_messages(
-            "tick_runner.dm_write",
-            {
-                "pc_id": pc_id,
-                "pc_name": pc_name,
-                "persona": persona_text,
-                "selected_target_json": json.dumps(selected_target, ensure_ascii=False),
-                "dm_context_json": json.dumps(dm_context, ensure_ascii=False),
-                "memories_json": json.dumps(memories_payload, ensure_ascii=False),
-            },
-        )
-        if used_memory_ids:
-            await self._store.touch_memories(used_memory_ids)
-
-        model = getattr(next((p for p in self._engine.pcs if p.id == pc_id), None), "model", None)
-        if not isinstance(model, str) or not model.strip():
-            model = self._settings.openai_model
-        if not isinstance(model, str) or not model.strip():
-            return {"type": "noop", "reason": "missing model"}
-
-        url = openai_chat_completions_url(self._settings.openai_base_url)
-        res = await self._llm.chat(
-            url=url,
-            apikey=self._settings.openai_api_key,
-            model=model,
-            messages=messages,
-            tools=None,
-        )
-
-        parsed = res.get("parsed") if isinstance(res, dict) else None
-        if isinstance(parsed, dict) and parsed.get("kind") == "structured":
-            structured = parsed.get("structured")
-            if isinstance(structured, dict):
-                return structured
-            return {"type": "noop", "reason": "llm returned non-object structured output"}
-
-        if isinstance(parsed, dict) and parsed.get("kind") == "markdown":
-            md = parsed.get("markdown")
-            if isinstance(md, str):
-                j = self._try_parse_json_loose(md)
-                if isinstance(j, dict):
-                    return j
-                return {"type": "noop", "reason": "llm returned non-json markdown"}
-
-        raw = res.get("raw") if isinstance(res, dict) else None
-        p2 = parse_llm_response(raw)
-        if p2["kind"] == "structured" and isinstance(p2["structured"], dict):
-            return p2["structured"]
-        if p2["kind"] == "markdown" and isinstance(p2["markdown"], str):
-            j = self._try_parse_json_loose(p2["markdown"])
-            if isinstance(j, dict):
-                return j
-        return {"type": "noop", "reason": "llm output parse failed"}
-
     @staticmethod
     def _summarize_message(m: Message, max_len: int = 200) -> str:
         who = m.from_actor.name or m.from_actor.kind
@@ -799,78 +334,6 @@ class TickRunner:
             content = content[:max_len] + "…"
         content = content.replace("\n", "\\n")
         return f"{who}: {content}"
-
-    def _build_reply_memory_keywords(
-        self,
-        *,
-        selected_thread: dict[str, Any],
-        thread_context: dict[str, Any],
-    ) -> list[str]:
-        limit = max(1, int(self._settings.memory_recall_max_keywords))
-        keywords: list[str] = []
-        seen: set[str] = set()
-
-        def add_keyword(value: str | None) -> None:
-            if not isinstance(value, str):
-                return
-            text = value.strip()
-            if not text:
-                return
-            key = text.casefold()
-            if key in seen:
-                return
-            seen.add(key)
-            keywords.append(text)
-
-        title = selected_thread.get("title")
-        if isinstance(title, str) and title.strip():
-            add_keyword(title.strip())
-
-        texts: list[str] = []
-        if isinstance(title, str):
-            texts.append(title)
-
-        op_post = thread_context.get("op_post")
-        if isinstance(op_post, dict):
-            content = op_post.get("content")
-            if isinstance(content, str):
-                texts.append(content)
-
-        recent_posts = thread_context.get("recent_posts")
-        if isinstance(recent_posts, list):
-            for post in recent_posts[-6:]:
-                if not isinstance(post, dict):
-                    continue
-                content = post.get("content")
-                if isinstance(content, str):
-                    texts.append(content)
-
-        combined = "\n".join(texts)
-        for pc in self._engine.pcs:
-            if pc.name and pc.name in combined:
-                add_keyword(pc.name)
-
-        weights: dict[str, int] = {}
-        for match in self._MEMORY_TOKEN_PATTERN.findall(combined):
-            token = match.strip()
-            if not token:
-                continue
-            norm = token.casefold()
-            if norm in self._MEMORY_STOPWORDS:
-                continue
-            if norm.isdigit():
-                continue
-            if len(token) <= 1:
-                continue
-            weights[token] = weights.get(token, 0) + 1
-
-        sorted_tokens = sorted(weights.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))
-        for token, _ in sorted_tokens:
-            add_keyword(token)
-            if len(keywords) >= limit:
-                break
-
-        return keywords[:limit]
 
     @staticmethod
     def _trim_memory_text(text: str, *, max_len: int) -> str:
@@ -1357,73 +820,6 @@ class TickRunner:
                 pass
             return
 
-    async def _recall_reply_memories(
-        self,
-        *,
-        pc_id: str,
-        selected_thread: dict[str, Any],
-        thread_context: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        keywords = self._build_reply_memory_keywords(selected_thread=selected_thread, thread_context=thread_context)
-        memories = await self._store.search_memories(
-            keywords=keywords,
-            owner_pc_id=pc_id,
-            include_public=True,
-            limit=max(20, int(self._settings.memory_recall_max_items) * 4),
-        )
-        if not memories:
-            memories = await self._store.list_memories(
-                scope="pc",
-                owner_pc_id=pc_id,
-                kind="autobiography",
-                limit=min(2, max(1, int(self._settings.memory_recall_max_items))),
-            )
-
-        payload, used_ids = self._format_memories_for_prompt(memories)
-        return payload, used_ids
-
-    async def _recall_dm_memories(
-        self,
-        *,
-        pc_id: str,
-        selected_target: dict[str, Any],
-        dm_context: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        scope_id = self._clean_str(dm_context.get("scope_id")) or self._clean_str(selected_target.get("scope_id"))
-        parts: list[str] = []
-
-        target_name = selected_target.get("name")
-        if isinstance(target_name, str):
-            parts.append(target_name)
-
-        recent_messages = dm_context.get("recent_messages")
-        if isinstance(recent_messages, list):
-            for item in recent_messages[-8:]:
-                if not isinstance(item, dict):
-                    continue
-                content = item.get("content")
-                if isinstance(content, str):
-                    parts.append(content)
-
-        keywords = self._extract_memory_keywords(*parts)
-        memories = await self._store.search_memories(
-            keywords=keywords,
-            owner_pc_id=pc_id,
-            include_public=False,
-            direct_scope_id=scope_id,
-            limit=max(20, int(self._settings.memory_recall_max_items) * 4),
-        )
-        if not memories:
-            memories = await self._store.list_memories(
-                scope="pc",
-                owner_pc_id=pc_id,
-                kind="autobiography",
-                limit=min(2, max(1, int(self._settings.memory_recall_max_items))),
-            )
-
-        payload, used_ids = self._format_memories_for_prompt(memories)
-        return payload, used_ids
-
     @staticmethod
     def _try_parse_json_loose(text: str) -> Any | None:
         s = (text or "").strip()
@@ -1450,6 +846,22 @@ class TickRunner:
             {
                 "type": "function",
                 "function": {
+                    "name": "forum_list_threads",
+                    "description": "List thread digests for a forum channel (bounded).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "channel_id": {"type": "string"},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 30, "default": 12},
+                            "order": {"type": "string", "enum": ["active", "new"], "default": "active"},
+                        },
+                        "required": ["channel_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "forum_get_thread_context",
                     "description": "Fetch compact forum thread context (op + recent posts) with bounded length.",
                     "parameters": {
@@ -1461,6 +873,23 @@ class TickRunner:
                             "max_chars_per_post": {"type": "integer", "minimum": 200, "maximum": 1600, "default": 1200},
                         },
                         "required": ["thread_id", "channel_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "dm_list_inbox",
+                    "description": "List inbox digest items for a PC (bounded, peer-aggregated).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pc_id": {"type": "string"},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 24, "default": 12},
+                            "lines_per_peer": {"type": "integer", "minimum": 1, "maximum": 4, "default": 2},
+                            "max_chars_per_line": {"type": "integer", "minimum": 120, "maximum": 800, "default": 320},
+                        },
+                        "required": ["pc_id"],
                     },
                 },
             },
@@ -1482,10 +911,177 @@ class TickRunner:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_search",
+                    "description": "Search memories for the current PC (private + optional public + optional validated direct scope).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pc_id": {"type": "string"},
+                            "keywords": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 12},
+                            "include_public": {"type": "boolean", "default": True},
+                            "direct_scope_id": {"type": "string"},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 60, "default": 20},
+                        },
+                        "required": ["pc_id", "keywords"],
+                    },
+                },
+            },
         ]
+
+    async def _v4_list_threads_digest(
+        self,
+        *,
+        channel_id: str,
+        limit: int,
+        order: str,
+    ) -> list[dict[str, Any]]:
+        convs = await self._store.list_conversations()
+        if not any(c.kind == "forum" and c.id == channel_id for c in convs):
+            raise ValueError("channel not found or not a forum channel")
+
+        threads = await self._store.list_forum_threads(channel_id)
+        threads_sorted = list(threads)
+        if order == "new":
+            threads_sorted.sort(key=lambda t: (str(t.created_at or ""), str(t.id or "")), reverse=True)
+        else:
+            threads_sorted.sort(
+                key=lambda t: (
+                    1 if t.pinned else 0,
+                    str(t.last_activity_at or ""),
+                ),
+                reverse=True,
+            )
+
+        out: list[dict[str, Any]] = []
+        for t in threads_sorted[: max(0, int(limit))]:
+            title = t.title
+            if t.locked and "已锁定，请勿回复" not in title:
+                title = f"{title} 已锁定，请勿回复"
+            out.append(
+                {
+                    "channel_id": t.channel_id,
+                    "thread_id": t.id,
+                    "title": title,
+                    "reply_count": t.reply_count,
+                    "last_activity_at": t.last_activity_at,
+                    "pinned": t.pinned,
+                    "locked": t.locked,
+                }
+            )
+        return out
+
+    async def _v4_list_inbox_digest(
+        self,
+        *,
+        pc_id: str,
+        limit: int,
+        lines_per_peer: int,
+        max_chars_per_line: int,
+    ) -> list[dict[str, Any]]:
+        inbox_recent_msgs = await self._store.list_messages(f"dm_to_{pc_id}", limit=160)
+        pc_name_by_id = {p.id: p.name for p in self._engine.pcs}
+
+        latest_by_peer: dict[str, dict[str, Any]] = {}
+
+        def get_peer(m: Message) -> tuple[str, str]:
+            if m.from_actor.kind == "dm":
+                return ("dm", (m.from_actor.name or "DM").strip() or "DM")
+
+            if m.from_actor.kind == "pc" and m.from_actor.id and m.from_actor.id != pc_id:
+                peer_id = m.from_actor.id
+                peer_name = pc_name_by_id.get(peer_id) or m.from_actor.name or peer_id
+                return (peer_id, peer_name)
+
+            if m.from_actor.kind == "pc" and m.from_actor.id == pc_id:
+                to_list = m.to or []
+                peer_pc = next((a for a in to_list if a.kind == "pc" and a.id and a.id != pc_id), None)
+                if peer_pc is not None and peer_pc.id:
+                    peer_id2 = peer_pc.id
+                    peer_name2 = pc_name_by_id.get(peer_id2) or peer_pc.name or peer_id2
+                    return (peer_id2, peer_name2)
+                if any(a.kind == "dm" for a in to_list):
+                    return ("dm", "DM")
+
+            return ("", "")
+
+        for m in inbox_recent_msgs:
+            peer_id, peer_name = get_peer(m)
+            if not peer_id:
+                continue
+
+            peer_digest = latest_by_peer.setdefault(
+                peer_id,
+                {
+                    "_ts": m.timestamp,
+                    "id": peer_id,
+                    "name": peer_name or peer_id,
+                    "messages": [],
+                },
+            )
+            peer_digest["_ts"] = max(str(peer_digest.get("_ts") or ""), str(m.timestamp))
+            peer_digest["name"] = peer_name or peer_digest.get("name") or peer_id
+
+            messages = peer_digest["messages"]
+            if isinstance(messages, list):
+                messages.append(self._summarize_message(m, max_len=max_chars_per_line))
+                if len(messages) > lines_per_peer:
+                    del messages[:-lines_per_peer]
+
+        inbox_digest = list(latest_by_peer.values())
+        inbox_digest.sort(key=lambda x: str(x.get("_ts") or ""), reverse=True)
+        for it in inbox_digest:
+            it.pop("_ts", None)
+        return inbox_digest[: max(0, int(limit))]
+
+    def _v4_validate_direct_scope_id(self, *, pc_id: str, direct_scope_id: str) -> str | None:
+        scope_id = direct_scope_id.strip()
+        if not scope_id:
+            return None
+
+        if scope_id == f"dm_to_{pc_id}":
+            return scope_id
+
+        if scope_id.startswith("pc_pair:"):
+            parts = scope_id.split(":")
+            if len(parts) != 3:
+                return None
+            left = parts[1].strip()
+            right = parts[2].strip()
+            if not left or not right:
+                return None
+            if pc_id not in {left, right}:
+                return None
+            other = right if left == pc_id else left
+            if not any(p.id == other for p in self._engine.pcs):
+                return None
+            left2, right2 = sorted([pc_id, other])
+            return f"pc_pair:{left2}:{right2}"
+
+        return None
 
     async def _v4_execute_tool(self, *, pc_id: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
+            if name == "forum_list_threads":
+                channel_id = self._clean_str(args.get("channel_id"))
+                limit_raw = args.get("limit")
+                order_raw = self._clean_str(args.get("order")) or "active"
+
+                if not channel_id:
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "channel_id required"}}
+
+                limit = 12
+                if isinstance(limit_raw, (int, float)):
+                    limit = int(limit_raw)
+                limit = max(1, min(30, limit))
+
+                order = order_raw if order_raw in {"active", "new"} else "active"
+
+                threads = await self._v4_list_threads_digest(channel_id=channel_id, limit=limit, order=order)
+                return {"ok": True, "data": {"threads": threads}}
+
             if name == "forum_get_thread_context":
                 thread_id = self._clean_str(args.get("thread_id"))
                 channel_id = self._clean_str(args.get("channel_id"))
@@ -1517,6 +1113,38 @@ class TickRunner:
                 # Further bound total size to protect llm_logs/message budgets.
                 data = self._v4_compact_thread_context(data)
                 return {"ok": True, "data": data}
+
+            if name == "dm_list_inbox":
+                tool_pc_id = self._clean_str(args.get("pc_id"))
+                limit_raw = args.get("limit")
+                lines_raw = args.get("lines_per_peer")
+                max_chars_raw = args.get("max_chars_per_line")
+
+                if tool_pc_id != pc_id:
+                    return {"ok": False, "error": {"code": "PC_MISMATCH", "message": "pc_id mismatch"}}
+
+                limit = 12
+                if isinstance(limit_raw, (int, float)):
+                    limit = int(limit_raw)
+                limit = max(1, min(24, limit))
+
+                lines_per_peer = 2
+                if isinstance(lines_raw, (int, float)):
+                    lines_per_peer = int(lines_raw)
+                lines_per_peer = max(1, min(4, lines_per_peer))
+
+                max_chars_per_line = 320
+                if isinstance(max_chars_raw, (int, float)):
+                    max_chars_per_line = int(max_chars_raw)
+                max_chars_per_line = max(120, min(800, max_chars_per_line))
+
+                items = await self._v4_list_inbox_digest(
+                    pc_id=pc_id,
+                    limit=limit,
+                    lines_per_peer=lines_per_peer,
+                    max_chars_per_line=max_chars_per_line,
+                )
+                return {"ok": True, "data": {"inbox": items}}
 
             if name == "dm_get_peer_context":
                 tool_pc_id = self._clean_str(args.get("pc_id"))
@@ -1557,6 +1185,98 @@ class TickRunner:
                 )
                 data = self._v4_compact_dm_context(data)
                 return {"ok": True, "data": data}
+
+            if name == "memory_search":
+                tool_pc_id = self._clean_str(args.get("pc_id"))
+                keywords_raw = args.get("keywords")
+                include_public_raw = args.get("include_public")
+                direct_scope_raw = args.get("direct_scope_id")
+                limit_raw = args.get("limit")
+
+                if tool_pc_id != pc_id:
+                    return {"ok": False, "error": {"code": "PC_MISMATCH", "message": "pc_id mismatch"}}
+                if not isinstance(keywords_raw, list):
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "keywords must be an array"}}
+
+                cleaned_keywords: list[str] = []
+                seen: set[str] = set()
+                for value in keywords_raw:
+                    if not isinstance(value, str):
+                        continue
+                    text = value.strip()
+                    if not text:
+                        continue
+                    key = text.casefold()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    cleaned_keywords.append(text)
+                    if len(cleaned_keywords) >= 12:
+                        break
+                if not cleaned_keywords:
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "keywords must not be empty"}}
+
+                include_public = True
+                if isinstance(include_public_raw, bool):
+                    include_public = include_public_raw
+
+                limit = 20
+                if isinstance(limit_raw, (int, float)):
+                    limit = int(limit_raw)
+                limit = max(1, min(60, limit))
+
+                direct_scope_id: str | None = None
+                if isinstance(direct_scope_raw, str) and direct_scope_raw.strip():
+                    direct_scope_id = self._v4_validate_direct_scope_id(pc_id=pc_id, direct_scope_id=direct_scope_raw)
+                    if direct_scope_id is None:
+                        return {"ok": False, "error": {"code": "BAD_ARGS", "message": "invalid direct_scope_id"}}
+
+                memories = await self._store.search_memories(
+                    keywords=cleaned_keywords,
+                    owner_pc_id=pc_id,
+                    include_public=include_public,
+                    direct_scope_id=direct_scope_id,
+                    limit=max(20, limit),
+                )
+
+                items: list[dict[str, Any]] = []
+                budget_chars = 32_000
+                used_chars = 0
+                omitted = 0
+                for memory in memories:
+                    content = memory.content
+                    summary = memory.summary
+                    if not isinstance(content, str) or not content.strip():
+                        continue
+                    if not isinstance(summary, str):
+                        summary = ""
+
+                    approx = len(content) + len(summary) + 160
+                    if approx > budget_chars and not items:
+                        # Avoid blowing up tool output with a single gigantic memory; skip it.
+                        omitted += 1
+                        continue
+                    if used_chars + approx > budget_chars:
+                        omitted += 1
+                        continue
+
+                    items.append(
+                        {
+                            "id": memory.id,
+                            "scope": memory.scope,
+                            "scope_id": memory.scope_id,
+                            "kind": memory.kind,
+                            "subject_id": memory.subject_id,
+                            "score": memory.score,
+                            "summary": summary,
+                            "content": content,
+                            "updated_at": memory.updated_at,
+                        }
+                    )
+                    used_chars += approx
+
+                truncated = omitted > 0
+                return {"ok": True, "data": {"items": items, "truncated": truncated, "omitted_count": omitted}}
 
             return {"ok": False, "error": {"code": "UNKNOWN_TOOL", "message": f"unknown tool: {name}"}}
         except Exception as exc:  # noqa: BLE001
