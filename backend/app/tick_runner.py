@@ -24,6 +24,7 @@ from .engine import DemoEngine
 from .llm import LlmService, openai_chat_completions_url, parse_llm_response
 from .models import Actor, Event, ForumThread, MemoryEntry, Message, PcActivity, TickRecord, utc_now_iso
 from .settings import Settings
+from .v4_executor import ToolCallLimits, run_tool_calling_loop
 from .ws import ConnectionManager
 
 
@@ -239,20 +240,6 @@ class TickRunner:
                         if round2_errors:
                             tick.error = "; ".join(round2_errors)
                         await self._store.upsert_tick(tick)
-                elif isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "reply":
-                    tick.error = "reply is not allowed in round 1; use reply_select"
-                    await self._store.upsert_tick(tick)
-                    refs = await self._apply_action(
-                        pc_id=pc.id,
-                        action=NoopAction(type="noop", reason="reply not allowed in round 1"),
-                    )
-                elif isinstance(raw_for_validation, dict) and str(raw_for_validation.get("type") or "") == "dm":
-                    tick.error = "dm is not allowed in round 1; use dm_select"
-                    await self._store.upsert_tick(tick)
-                    refs = await self._apply_action(
-                        pc_id=pc.id,
-                        action=NoopAction(type="noop", reason="dm not allowed in round 1"),
-                    )
                 else:
                     action, errors = validate_action(raw_for_validation, ctx=ctx)
                     if errors:
@@ -1457,9 +1444,174 @@ class TickRunner:
         except Exception:  # noqa: BLE001
             return None
 
+    @staticmethod
+    def _v4_tools() -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "forum_get_thread_context",
+                    "description": "Fetch compact forum thread context (op + recent posts) with bounded length.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "thread_id": {"type": "string"},
+                            "channel_id": {"type": "string"},
+                            "recent_n": {"type": "integer", "minimum": 1, "maximum": 24, "default": 12},
+                            "max_chars_per_post": {"type": "integer", "minimum": 200, "maximum": 1600, "default": 1200},
+                        },
+                        "required": ["thread_id", "channel_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "dm_get_peer_context",
+                    "description": "Fetch compact DM context between this PC and a peer (PC or DM).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pc_id": {"type": "string"},
+                            "peer_kind": {"type": "string", "enum": ["pc", "dm"]},
+                            "peer_id": {"type": "string"},
+                            "recent_n": {"type": "integer", "minimum": 1, "maximum": 48, "default": 24},
+                            "max_chars_per_message": {"type": "integer", "minimum": 200, "maximum": 1600, "default": 800},
+                        },
+                        "required": ["pc_id", "peer_kind", "peer_id"],
+                    },
+                },
+            },
+        ]
+
+    async def _v4_execute_tool(self, *, pc_id: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            if name == "forum_get_thread_context":
+                thread_id = self._clean_str(args.get("thread_id"))
+                channel_id = self._clean_str(args.get("channel_id"))
+                recent_n_raw = args.get("recent_n")
+                max_chars_raw = args.get("max_chars_per_post")
+
+                if not thread_id or not channel_id:
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "thread_id/channel_id required"}}
+
+                recent_n = 12
+                if isinstance(recent_n_raw, (int, float)):
+                    recent_n = int(recent_n_raw)
+                recent_n = max(1, min(24, recent_n))
+
+                max_chars_per_post = 1200
+                if isinstance(max_chars_raw, (int, float)):
+                    max_chars_per_post = int(max_chars_raw)
+                max_chars_per_post = max(200, min(1600, max_chars_per_post))
+                # Keep tool output bounded even when caller requests a large max_chars.
+                max_chars_per_post = min(900, max_chars_per_post)
+
+                data = await self._store.get_thread_context(
+                    thread_id=thread_id,
+                    channel_id=channel_id,
+                    recent_n=recent_n,
+                    max_chars_per_post=max_chars_per_post,
+                    op_max_chars=1200,
+                )
+                # Further bound total size to protect llm_logs/message budgets.
+                data = self._v4_compact_thread_context(data)
+                return {"ok": True, "data": data}
+
+            if name == "dm_get_peer_context":
+                tool_pc_id = self._clean_str(args.get("pc_id"))
+                peer_kind = self._clean_str(args.get("peer_kind"))
+                peer_id = self._clean_str(args.get("peer_id"))
+                recent_n_raw = args.get("recent_n")
+                max_chars_raw = args.get("max_chars_per_message")
+
+                if tool_pc_id != pc_id:
+                    return {"ok": False, "error": {"code": "PC_MISMATCH", "message": "pc_id mismatch"}}
+                if peer_kind not in {"pc", "dm"} or not peer_id:
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "invalid peer_kind/peer_id"}}
+                if peer_kind == "pc":
+                    if peer_id == pc_id:
+                        return {"ok": False, "error": {"code": "BAD_ARGS", "message": "cannot dm self"}}
+                    if not any(p.id == peer_id for p in self._engine.pcs):
+                        return {"ok": False, "error": {"code": "NOT_FOUND", "message": "peer pc not found"}}
+                if peer_kind == "dm" and peer_id != "dm":
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "peer_id must be 'dm' for dm"}}
+
+                recent_n = 24
+                if isinstance(recent_n_raw, (int, float)):
+                    recent_n = int(recent_n_raw)
+                recent_n = max(1, min(48, recent_n))
+
+                max_chars_per_message = 800
+                if isinstance(max_chars_raw, (int, float)):
+                    max_chars_per_message = int(max_chars_raw)
+                max_chars_per_message = max(200, min(1600, max_chars_per_message))
+                max_chars_per_message = min(900, max_chars_per_message)
+
+                data = await self._build_dm_peer_context(
+                    pc_id=pc_id,
+                    peer_kind=peer_kind,
+                    peer_id=peer_id,
+                    recent_n=recent_n,
+                    max_chars_per_message=max_chars_per_message,
+                )
+                data = self._v4_compact_dm_context(data)
+                return {"ok": True, "data": data}
+
+            return {"ok": False, "error": {"code": "UNKNOWN_TOOL", "message": f"unknown tool: {name}"}}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": {"code": "EXCEPTION", "message": f"{type(exc).__name__}: {exc}"}}
+
+    @staticmethod
+    def _v4_compact_thread_context(data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Apply a second-pass compaction to keep tool output comfortably under executor budgets.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        def trim(v: Any, max_len: int) -> str:
+            s = (str(v or "")).replace("\r\n", "\n").replace("\r", "\n").strip()
+            return s[:max_len] + "…" if len(s) > max_len else s
+
+        op_post = data.get("op_post")
+        if isinstance(op_post, dict):
+            if "content" in op_post:
+                op_post["content"] = trim(op_post.get("content"), 900)
+
+        recent_posts = data.get("recent_posts")
+        if isinstance(recent_posts, list):
+            # Keep only a short tail by default; the model can ask again if needed.
+            kept = recent_posts[-10:]
+            for item in kept:
+                if isinstance(item, dict) and "content" in item:
+                    item["content"] = trim(item.get("content"), 700)
+            data["recent_posts"] = kept
+
+        return data
+
+    @staticmethod
+    def _v4_compact_dm_context(data: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return data
+
+        def trim(v: Any, max_len: int) -> str:
+            s = (str(v or "")).replace("\r\n", "\n").replace("\r", "\n").strip()
+            return s[:max_len] + "…" if len(s) > max_len else s
+
+        recent_messages = data.get("recent_messages")
+        if isinstance(recent_messages, list):
+            kept = recent_messages[-18:]
+            for item in kept:
+                if isinstance(item, dict) and "content" in item:
+                    item["content"] = trim(item.get("content"), 700)
+            data["recent_messages"] = kept
+
+        return data
+
     async def _llm_action(self, *, pc_id: str, pc_name: str, persona: str | None, since: str | None) -> dict[str, Any]:
         """
-        Ask the LLM to output a single JSON action (no tool-calling).
+        v4: Run a tool-calling agent loop, then return a single final JSON action.
         """
         if self._llm is None:
             return {"type": "noop", "reason": "llm not configured"}
@@ -1559,7 +1711,7 @@ class TickRunner:
         )
         threads_digest = threads_all[:12]
         # NOTE: Intentionally do NOT embed thread posts here. We only provide a lightweight digest and
-        # fetch the selected thread context in a follow-up round (reply_select -> reply_write).
+        # let the agent fetch thread context via tools (forum_get_thread_context) on demand.
 
         forum_channels = [{"id": c.id, "title": c.title, "description": c.description, "group": c.group} for c in forum_convs]
 
@@ -1568,7 +1720,7 @@ class TickRunner:
         pcs = [{"id": p.id, "name": p.name} for p in self._engine.pcs]
 
         messages = render_prompt_messages(
-            "tick_runner.forum_action",
+            "tick_runner.v4_action",
             {
                 "pc_id": pc_id,
                 "pc_name": pc_name,
@@ -1588,38 +1740,25 @@ class TickRunner:
             return {"type": "noop", "reason": "missing model"}
 
         url = openai_chat_completions_url(self._settings.openai_base_url)
-        res = await self._llm.chat(
+        tools = self._v4_tools()
+
+        async def tool_handler(tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
+            return await self._v4_execute_tool(pc_id=pc_id, name=tool_name, args=tool_args)
+
+        return await run_tool_calling_loop(
+            llm_chat=self._llm.chat,
             url=url,
             apikey=self._settings.openai_api_key,
             model=model,
             messages=messages,
-            tools=None,
+            tools=tools,
+            tool_handler=tool_handler,
+            limits=ToolCallLimits(
+                max_tool_rounds=3,
+                max_tool_calls_per_round=2,
+                max_total_tool_output_chars=12_000,
+            ),
         )
-
-        parsed = res.get("parsed") if isinstance(res, dict) else None
-        if isinstance(parsed, dict) and parsed.get("kind") == "structured":
-            structured = parsed.get("structured")
-            if isinstance(structured, dict):
-                return structured
-            return {"type": "noop", "reason": "llm returned non-object structured output"}
-
-        if isinstance(parsed, dict) and parsed.get("kind") == "markdown":
-            md = parsed.get("markdown")
-            if isinstance(md, str):
-                j = self._try_parse_json_loose(md)
-                if isinstance(j, dict):
-                    return j
-                return {"type": "noop", "reason": "llm returned non-json markdown"}
-
-        raw = res.get("raw") if isinstance(res, dict) else None
-        p2 = parse_llm_response(raw)
-        if p2["kind"] == "structured" and isinstance(p2["structured"], dict):
-            return p2["structured"]
-        if p2["kind"] == "markdown" and isinstance(p2["markdown"], str):
-            j = self._try_parse_json_loose(p2["markdown"])
-            if isinstance(j, dict):
-                return j
-        return {"type": "noop", "reason": "llm output parse failed"}
 
     async def _build_dm_digest_context(self, *, since: str, until: str) -> dict[str, Any]:
         pcs = [{"id": p.id, "name": p.name} for p in self._engine.pcs]
@@ -2101,26 +2240,27 @@ class TickRunner:
                 thread = next((t for t in threads if not t.locked), None)
                 if thread is None:
                     return {"type": "noop", "reason": "no unlocked thread to reply"}
+                now = utc_now_iso()
                 return {
-                    "type": "reply_select",
+                    "type": "reply",
                     "channel_id": forum_channels[0],
                     "thread_id": thread.id,
-                    "selection_reason": "demo_fake: pick first unlocked thread",
+                    "content": f"【自动行动】跟帖一条（{now[:19]}）。",
                 }
             if m == 3:
                 now = utc_now_iso()
                 idx = next((i for i, p in enumerate(self._engine.pcs) if p.id == pc_id), 0)
                 target = self._engine.pcs[(idx + 1) % len(self._engine.pcs)]
                 return {
-                    "type": "dm_select",
+                    "type": "dm",
                     "to_pc_id": target.id,
-                    "selection_reason": f"demo_fake: ping {target.name} ({now[:19]})",
+                    "content": f"【自动私信】{target.name}，我这边刚同步一下进度（{now[:19]}）。",
                 }
             return {"type": "noop", "reason": "idle"}
 
         if turn_no % 2 == 0:
             now = utc_now_iso()
-            return {"type": "dm_select", "selection_reason": f"demo_fake: dm admin ({now[:19]})"}
+            return {"type": "dm", "content": f"【自动私信】DM，我这边先报个平安（{now[:19]}）。"}
         return {"type": "noop", "reason": "no_forum_channel"}
 
     async def _apply_action(self, *, pc_id: str, action: CreateThreadAction | ReplyAction | DmAction | NoopAction) -> list[dict[str, Any]]:
