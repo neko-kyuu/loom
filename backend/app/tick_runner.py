@@ -1707,7 +1707,8 @@ class TickRunner:
             if not content:
                 errors.append("dm.content is required")
             elif len(content) > 400:
-                content = content[:400]
+                # Keep full content for DB; prompt still suggests a short reply.
+                pass
             if errors:
                 return {"type": "noop", "reason": "invalid dm"}, errors
             return {"type": "dm", "to_pc_id": to_pc_id, "content": content}, []
@@ -1717,7 +1718,7 @@ class TickRunner:
             if not content:
                 return {"type": "noop", "reason": "invalid broadcast"}, ["broadcast.content is required"]
             if len(content) > 1200:
-                content = content[:1200]
+                pass
             return {"type": "broadcast", "content": content}, []
 
         if a_type == "noop":

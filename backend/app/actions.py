@@ -105,8 +105,7 @@ def validate_action(raw: Any, *, ctx: ActionValidationContext) -> tuple[Action, 
         if not content:
             errors.append("create_thread.content is required")
         elif len(content) > 1200:
-            content = content[:1200]
-            notes.append("create_thread.content truncated to 1200 chars")
+            notes.append("create_thread.content exceeds 1200 chars")
         if errors:
             return NoopAction(type="noop", reason="invalid create_thread"), errors
         return CreateThreadAction(type="create_thread", channel_id=channel_id, title=title, content=content), notes
@@ -130,8 +129,7 @@ def validate_action(raw: Any, *, ctx: ActionValidationContext) -> tuple[Action, 
         if not content:
             errors.append("reply.content is required")
         elif len(content) > 1200:
-            content = content[:1200]
-            notes.append("reply.content truncated to 1200 chars")
+            notes.append("reply.content exceeds 1200 chars")
         if errors:
             return NoopAction(type="noop", reason="invalid reply"), errors
         return ReplyAction(type="reply", channel_id=channel_id, thread_id=thread_id, content=content), notes
@@ -144,8 +142,7 @@ def validate_action(raw: Any, *, ctx: ActionValidationContext) -> tuple[Action, 
         if not content:
             errors.append("dm.content is required")
         elif len(content) > 800:
-            content = content[:800]
-            notes.append("dm.content truncated to 800 chars")
+            notes.append("dm.content exceeds 800 chars")
         if errors:
             return NoopAction(type="noop", reason="invalid dm"), errors
         return DmAction(type="dm", to_pc_id=to_pc_id, content=content), notes
