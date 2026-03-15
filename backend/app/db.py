@@ -1,12 +1,45 @@
 from __future__ import annotations
 
 import json
+import array
+import sys
 from datetime import datetime, timezone
 from collections.abc import Iterable
 
 import aiosqlite
 
 from .models import Conversation, Event, ForumThread, MemoryEntry, Message, PcActivity, TickRecord
+
+
+def _pack_embedding_f32(values: list[float]) -> bytes | None:
+    if not isinstance(values, list) or not values:
+        return None
+    arr = array.array("f")
+    try:
+        for v in values:
+            if not isinstance(v, (int, float)):
+                return None
+            arr.append(float(v))
+    except Exception:
+        return None
+    if sys.byteorder == "big":
+        arr.byteswap()
+    return arr.tobytes()
+
+
+def _unpack_embedding_f32(blob: bytes, *, dims: int) -> list[float] | None:
+    if not isinstance(blob, (bytes, bytearray)) or dims <= 0:
+        return None
+    if len(blob) != dims * 4:
+        return None
+    arr = array.array("f")
+    try:
+        arr.frombytes(blob)
+    except Exception:
+        return None
+    if sys.byteorder == "big":
+        arr.byteswap()
+    return [float(x) for x in arr]
 
 
 SCHEMA_SQL = """
@@ -140,6 +173,18 @@ CREATE INDEX IF NOT EXISTS idx_memories_deleted_at
 CREATE INDEX IF NOT EXISTS idx_memories_edit_state
   ON memories(edit_state);
 
+-- v5: summary-only embeddings for memory items (hybrid recall)
+CREATE TABLE IF NOT EXISTS memory_summary_embeddings (
+  memory_id TEXT PRIMARY KEY,
+  model TEXT NOT NULL,
+  dims INTEGER NOT NULL,
+  summary_sha256 TEXT NOT NULL,
+  embedding_blob BLOB NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_summary_embeddings_model_updated
+  ON memory_summary_embeddings(model, updated_at);
+
 CREATE TABLE IF NOT EXISTS kv_settings (
   key TEXT PRIMARY KEY,
   json TEXT NOT NULL,
@@ -197,6 +242,85 @@ class SqliteStore:
             await db.execute("ALTER TABLE memories ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_deleted_at ON memories(deleted_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_edit_state ON memories(edit_state)")
+
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS memory_summary_embeddings ("
+            "memory_id TEXT PRIMARY KEY, "
+            "model TEXT NOT NULL, "
+            "dims INTEGER NOT NULL, "
+            "summary_sha256 TEXT NOT NULL, "
+            "embedding_blob BLOB NOT NULL, "
+            "updated_at TEXT NOT NULL"
+            ")"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_summary_embeddings_model_updated "
+            "ON memory_summary_embeddings(model, updated_at)"
+        )
+
+        # v5 migration: switch from JSON embeddings to float32 BLOB storage for performance.
+        cur = await db.execute("PRAGMA table_info(memory_summary_embeddings)")
+        cols = await cur.fetchall()
+        col_names = {r["name"] for r in cols}
+        if cols and "embedding_json" in col_names and "embedding_blob" not in col_names:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS memory_summary_embeddings_v2 ("
+                "memory_id TEXT PRIMARY KEY, "
+                "model TEXT NOT NULL, "
+                "dims INTEGER NOT NULL, "
+                "summary_sha256 TEXT NOT NULL, "
+                "embedding_blob BLOB NOT NULL, "
+                "updated_at TEXT NOT NULL"
+                ")"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_summary_embeddings_v2_model_updated "
+                "ON memory_summary_embeddings_v2(model, updated_at)"
+            )
+
+            cur = await db.execute(
+                "SELECT memory_id, model, dims, summary_sha256, embedding_json, updated_at "
+                "FROM memory_summary_embeddings"
+            )
+            rows = await cur.fetchall()
+            for row in rows:
+                mid = str(row["memory_id"] or "").strip()
+                model = str(row["model"] or "").strip()
+                summary_sha = str(row["summary_sha256"] or "").strip()
+                updated_at = str(row["updated_at"] or "").strip()
+                try:
+                    dims = int(row["dims"])
+                except Exception:
+                    dims = 0
+                raw_json = row["embedding_json"]
+                if not mid or not model or not summary_sha or not updated_at or dims <= 0:
+                    continue
+                try:
+                    vec = json.loads(raw_json) if isinstance(raw_json, str) else None
+                except Exception:  # noqa: BLE001
+                    vec = None
+                if not isinstance(vec, list) or len(vec) != dims:
+                    continue
+                packed = _pack_embedding_f32([float(v) for v in vec if isinstance(v, (int, float))])
+                if packed is None or len(packed) != dims * 4:
+                    continue
+
+                await db.execute(
+                    "INSERT INTO memory_summary_embeddings_v2(memory_id, model, dims, summary_sha256, embedding_blob, updated_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(memory_id) DO UPDATE SET "
+                    "model=excluded.model, dims=excluded.dims, summary_sha256=excluded.summary_sha256, "
+                    "embedding_blob=excluded.embedding_blob, updated_at=excluded.updated_at",
+                    (mid, model, dims, summary_sha, packed, updated_at),
+                )
+
+            await db.execute("DROP TABLE memory_summary_embeddings")
+            await db.execute("ALTER TABLE memory_summary_embeddings_v2 RENAME TO memory_summary_embeddings")
+            await db.execute("DROP INDEX IF EXISTS idx_memory_summary_embeddings_v2_model_updated")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_summary_embeddings_model_updated "
+                "ON memory_summary_embeddings(model, updated_at)"
+            )
 
     async def upsert_conversations(self, conversations: Iterable[Conversation]) -> None:
         rows = [(c.id, c.model_dump_json()) for c in conversations]
@@ -897,6 +1021,33 @@ class SqliteStore:
             return None
         return self._memory_from_row(row)
 
+    async def list_memories_by_ids(
+        self,
+        memory_ids: Iterable[str],
+        *,
+        include_deleted: bool = False,
+    ) -> list[MemoryEntry]:
+        ids = [mid for mid in memory_ids if isinstance(mid, str) and mid.strip()]
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
+        where = f"WHERE id IN ({placeholders})"
+        if not include_deleted:
+            where += " AND deleted_at IS NULL"
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, scope, scope_id, owner_pc_id, kind, created_at, updated_at, content, summary, "
+                "subject_type, subject_id, importance, score, pinned, access_count, last_accessed_at, "
+                "deleted_at, edit_state, source_type, source_memory_id, revision, meta_json "
+                "FROM memories "
+                f"{where}",
+                ids,
+            )
+            rows = await cur.fetchall()
+        by_id = {row["id"]: self._memory_from_row(row) for row in rows}
+        return [by_id[memory_id] for memory_id in ids if memory_id in by_id]
+
     async def list_memories(
         self,
         *,
@@ -957,6 +1108,113 @@ class SqliteStore:
             )
             rows = await cur.fetchall()
         return [self._memory_from_row(row) for row in rows]
+
+    async def get_memory_summary_embedding_hashes(
+        self,
+        *,
+        memory_ids: Iterable[str],
+        model: str,
+    ) -> dict[str, str]:
+        ids = [mid for mid in memory_ids if isinstance(mid, str) and mid.strip()]
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                f"SELECT memory_id, summary_sha256 FROM memory_summary_embeddings WHERE model=? AND memory_id IN ({placeholders})",
+                (model, *ids),
+            )
+            rows = await cur.fetchall()
+        return {str(r["memory_id"]): str(r["summary_sha256"] or "") for r in rows}
+
+    async def upsert_memory_summary_embeddings(
+        self,
+        *,
+        model: str,
+        items: Iterable[tuple[str, str, list[float]]],
+        updated_at: str,
+    ) -> None:
+        rows: list[tuple[str, str, int, str, bytes, str]] = []
+        for memory_id, summary_sha256, vector in items:
+            if not isinstance(memory_id, str) or not memory_id.strip():
+                continue
+            if not isinstance(summary_sha256, str) or not summary_sha256.strip():
+                continue
+            if not isinstance(vector, list) or not vector:
+                continue
+            dims = len(vector)
+            packed = _pack_embedding_f32(vector)
+            if packed is None or len(packed) != dims * 4:
+                continue
+            rows.append((memory_id.strip(), model, dims, summary_sha256.strip(), packed, updated_at))
+        if not rows:
+            return
+        async with aiosqlite.connect(self._path) as db:
+            await db.executemany(
+                "INSERT INTO memory_summary_embeddings(memory_id, model, dims, summary_sha256, embedding_blob, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(memory_id) DO UPDATE SET "
+                "model=excluded.model, dims=excluded.dims, summary_sha256=excluded.summary_sha256, "
+                "embedding_blob=excluded.embedding_blob, updated_at=excluded.updated_at",
+                rows,
+            )
+            await db.commit()
+
+    async def list_memory_summary_embeddings_for_vector_search(
+        self,
+        *,
+        owner_pc_id: str | None,
+        include_public: bool,
+        direct_scope_id: str | None,
+        model: str,
+        scan_limit: int,
+    ) -> list[tuple[str, list[float]]]:
+        scope_clauses: list[str] = []
+        scope_params: list[str] = []
+        if owner_pc_id:
+            scope_clauses.append("(m.scope='pc' AND m.owner_pc_id=?)")
+            scope_params.append(owner_pc_id)
+        if include_public:
+            scope_clauses.append("(m.scope='public')")
+        if direct_scope_id:
+            scope_clauses.append("(m.scope='direct' AND m.scope_id=?)")
+            scope_params.append(direct_scope_id)
+        if not scope_clauses:
+            return []
+
+        where_parts = [f"({' OR '.join(scope_clauses)})", "m.deleted_at IS NULL", "e.model=?"]
+        params: list[str | int] = [*scope_params, model, max(1, int(scan_limit))]
+        where_sql = " WHERE " + " AND ".join(where_parts)
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT m.id AS id, e.dims AS dims, e.embedding_blob AS embedding_blob "
+                "FROM memories m JOIN memory_summary_embeddings e ON e.memory_id=m.id "
+                f"{where_sql} "
+                "ORDER BY m.score DESC, m.updated_at DESC LIMIT ?",
+                params,
+            )
+            rows = await cur.fetchall()
+
+        out: list[tuple[str, list[float]]] = []
+        for row in rows:
+            mid = str(row["id"] or "").strip()
+            if not mid:
+                continue
+            raw_blob = row["embedding_blob"]
+            try:
+                dims = int(row["dims"])
+            except Exception:
+                dims = 0
+            if not isinstance(raw_blob, (bytes, bytearray, memoryview)) or dims <= 0:
+                continue
+            vec = _unpack_embedding_f32(bytes(raw_blob), dims=dims)
+            if vec is None:
+                continue
+            out.append((mid, vec))
+        return out
 
     async def search_memories(
         self,

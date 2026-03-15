@@ -23,13 +23,19 @@ class Settings(BaseSettings):
 
     # OpenAI-compatible config (used when demo_fake=false)
     openai_base_url: str | None = None
+    # Optional: override embeddings endpoint URL (OpenAI-compatible `/embeddings`).
+    # If not set, embeddings URL defaults to `{openai_base_url}/embeddings`.
+    openai_embedding_url: str | None = None
     openai_api_key: str | None = None
+    # Optional: override embeddings API key (defaults to openai_api_key).
+    openai_embedding_api_key: str | None = None
     openai_model: str | None = None
 
     # Per-actor overrides (optional; can be provided via config.json)
     openai_dm_model: str | None = None
     openai_dm_persona: str = "你是DM（主持人/叙事者）。你负责把用户的话转述给PC们，并补充必要背景；回复简短明确。"
     openai_memory_model: str | None = None
+    openai_embedding_model: str | None = None
 
     # Per-PC overrides (optional; defaults live in backend/pc_config/)
     openai_pc_models: dict[str, str | None] = Field(default_factory=dict)
@@ -46,6 +52,18 @@ class Settings(BaseSettings):
     memory_decay_interval_ticks: int = 50
     memory_decay_k: int = 1
     memory_decay_threshold: int = -3
+
+    # v5: hybrid memory recall (lexical + optional vector)
+    memory_vector_enabled: bool = True
+    memory_vector_embed_secrets: bool = False
+    memory_vector_min_sim: float = 0.72
+    memory_vector_top_k: int = 30
+    memory_vector_scan_limit: int = 1200
+    memory_hybrid_lex_candidates: int = 40
+    memory_hybrid_w_sim: float = 1.0
+    memory_hybrid_w_lex: float = 0.35
+    memory_hybrid_w_score: float = 0.05
+    memory_hybrid_w_pinned: float = 0.2
 
     # v4 tool-calling executor limits
     v4_max_tool_rounds: int = 3

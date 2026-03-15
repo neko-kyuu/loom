@@ -20,6 +20,11 @@ def openai_chat_completions_url(base_url: str) -> str:
     return f"{b}/chat/completions"
 
 
+def openai_embeddings_url(base_url: str) -> str:
+    b = base_url.strip().rstrip("/")
+    return f"{b}/embeddings"
+
+
 class LlmRateLimit:
     """
     A simple rolling-window RPM limiter.
@@ -372,6 +377,98 @@ class LlmService:
             "raw": raw,
             "parsed": parsed,
         }
+
+    async def embeddings(
+        self,
+        *,
+        url: str,
+        apikey: str,
+        model: str,
+        inputs: list[str],
+        timeout_s: float = 60.0,
+        request_id: str | None = None,
+    ) -> list[list[float]]:
+        if not isinstance(inputs, list) or not inputs:
+            raise ValueError("inputs must be a non-empty list")
+
+        payload: dict[str, Any] = {"model": model, "input": inputs}
+
+        rid = request_id or str(uuid4())
+        created_at = utc_now_iso()
+        started = time.monotonic()
+
+        status_code: int | None = None
+        raw: Any | None = None
+        error: str | None = None
+
+        try:
+            resp = await self._manager.enqueue(
+                url=url,
+                apikey=apikey,
+                payload=payload,
+                timeout_s=timeout_s,
+                request_id=rid,
+            )
+            status_code = resp.get("status_code") if isinstance(resp, dict) else None
+            raw = resp.get("json") if isinstance(resp, dict) else None
+        except asyncio.CancelledError:
+            error = "cancelled"
+            raise
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            response_json = json.dumps(raw, ensure_ascii=False) if raw is not None else None
+            await asyncio.shield(
+                self._store.add_llm_log(
+                    log_id=rid,
+                    created_at=created_at,
+                    model=model,
+                    request_json=json.dumps(payload, ensure_ascii=False),
+                    response_json=response_json,
+                    status_code=status_code,
+                    error=error,
+                    duration_ms=duration_ms,
+                )
+            )
+
+        if not isinstance(raw, dict):
+            raise RuntimeError("embeddings response is not a JSON object")
+        data = raw.get("data")
+        if not isinstance(data, list) or not data:
+            raise RuntimeError("embeddings response missing data[]")
+
+        by_index: dict[int, list[float]] = {}
+        for i, item in enumerate(data):
+            if not isinstance(item, dict):
+                continue
+            idx_raw = item.get("index", i)
+            try:
+                idx = int(idx_raw)
+            except Exception:
+                idx = i
+            emb = item.get("embedding")
+            if not isinstance(emb, list) or not emb:
+                continue
+            out: list[float] = []
+            ok = True
+            for v in emb:
+                if not isinstance(v, (int, float)):
+                    ok = False
+                    break
+                out.append(float(v))
+            if not ok:
+                continue
+            by_index[idx] = out
+
+        out_vectors: list[list[float]] = []
+        for idx in range(len(inputs)):
+            vec = by_index.get(idx)
+            if vec is None:
+                raise RuntimeError(f"embeddings response missing vector at index={idx}")
+            out_vectors.append(vec)
+        return out_vectors
 
 
 async def _post_json(*, url: str, apikey: str, payload: dict[str, Any], timeout_s: float) -> dict[str, Any]:

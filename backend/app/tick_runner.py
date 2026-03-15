@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -21,7 +23,7 @@ from .actions import (
 )
 from .db import SqliteStore
 from .engine import DemoEngine
-from .llm import LlmService, openai_chat_completions_url, parse_llm_response
+from .llm import LlmService, openai_chat_completions_url, openai_embeddings_url, parse_llm_response
 from .models import Actor, Event, ForumThread, MemoryEntry, Message, PcActivity, TickRecord, utc_now_iso
 from .settings import Settings
 from .v4_executor import ToolCallLimits, run_tool_calling_loop
@@ -347,6 +349,107 @@ class TickRunner:
         if len(cleaned) > max_len:
             return cleaned[:max_len] + "…"
         return cleaned
+
+    def _memory_vector_enabled(self) -> bool:
+        if not bool(getattr(self._settings, "memory_vector_enabled", True)):
+            return False
+        if self._settings.demo_fake:
+            return False
+        if self._llm is None:
+            return False
+        if not (self._settings.openai_embedding_api_key or self._settings.openai_api_key):
+            return False
+        if not (self._settings.openai_embedding_url or self._settings.openai_base_url):
+            return False
+        model = getattr(self._settings, "openai_embedding_model", None)
+        return isinstance(model, str) and model.strip() != ""
+
+    def _embedding_api_key(self) -> str | None:
+        if isinstance(self._settings.openai_embedding_api_key, str) and self._settings.openai_embedding_api_key.strip():
+            return self._settings.openai_embedding_api_key.strip()
+        if isinstance(self._settings.openai_api_key, str) and self._settings.openai_api_key.strip():
+            return self._settings.openai_api_key.strip()
+        return None
+
+    def _embedding_url(self) -> str | None:
+        if isinstance(self._settings.openai_embedding_url, str) and self._settings.openai_embedding_url.strip():
+            return self._settings.openai_embedding_url.strip()
+        if isinstance(self._settings.openai_base_url, str) and self._settings.openai_base_url.strip():
+            return openai_embeddings_url(self._settings.openai_base_url)
+        return None
+
+    @staticmethod
+    def _sha256_text(text: str) -> str:
+        cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+    async def _maybe_upsert_memory_summary_embeddings(self, memories: list[MemoryEntry]) -> None:
+        if not self._memory_vector_enabled():
+            return
+        if not memories:
+            return
+
+        embed_secrets = bool(getattr(self._settings, "memory_vector_embed_secrets", False))
+        model = (getattr(self._settings, "openai_embedding_model", None) or "").strip()
+        if not model:
+            return
+        url = self._embedding_url()
+        if not url:
+            return
+        apikey = self._embedding_api_key()
+        if not apikey:
+            return
+
+        candidates: list[MemoryEntry] = []
+        hashes: dict[str, str] = {}
+        for memory in memories:
+            if memory.deleted_at or memory.edit_state == "deleted":
+                continue
+            if memory.kind == "secret" and not embed_secrets:
+                continue
+            if not isinstance(memory.summary, str) or not memory.summary.strip():
+                continue
+            h = self._sha256_text(memory.summary)
+            hashes[memory.id] = h
+            candidates.append(memory)
+
+        if not candidates:
+            return
+
+        try:
+            existing = await self._store.get_memory_summary_embedding_hashes(
+                memory_ids=[m.id for m in candidates],
+                model=model,
+            )
+            to_embed = [m for m in candidates if existing.get(m.id) != hashes.get(m.id)]
+            if not to_embed:
+                return
+
+            vectors = await self._llm.embeddings(
+                url=url,
+                apikey=apikey,
+                model=model,
+                inputs=[m.summary for m in to_embed],
+                timeout_s=60.0,
+            )
+            now = utc_now_iso()
+            await self._store.upsert_memory_summary_embeddings(
+                model=model,
+                items=[(m.id, hashes[m.id], vectors[i]) for i, m in enumerate(to_embed)],
+                updated_at=now,
+            )
+        except Exception as exc:  # noqa: BLE001
+            try:
+                await self._store.add_event(
+                    Event(
+                        type="memory_embedding_error",
+                        summary=f"memory summary embedding failed: {type(exc).__name__}",
+                        visibility="private",
+                        consequences={"error": f"{type(exc).__name__}: {exc}"},
+                    )
+                )
+            except Exception:
+                pass
 
     def _format_memories_for_prompt(self, memories: list[MemoryEntry]) -> tuple[list[dict[str, Any]], list[str]]:
         max_items = max(1, int(self._settings.memory_recall_max_items))
@@ -803,6 +906,7 @@ class TickRunner:
                     entries.append(entry)
             if entries:
                 await self._store.upsert_memories(entries)
+                await self._maybe_upsert_memory_summary_embeddings(entries)
         except Exception as exc:
             try:
                 await self._store.add_event(
@@ -1441,13 +1545,142 @@ class TickRunner:
                     if direct_scope_id is None:
                         return {"ok": False, "error": {"code": "BAD_ARGS", "message": "invalid direct_scope_id"}}
 
-                memories = await self._store.search_memories(
+                query_text = " ".join(cleaned_keywords).strip()
+
+                lex_limit = int(getattr(self._settings, "memory_hybrid_lex_candidates", 40) or 40)
+                lex_limit = max(10, min(200, lex_limit))
+                lex_candidates = await self._store.search_memories(
                     keywords=cleaned_keywords,
                     owner_pc_id=pc_id,
                     include_public=include_public,
                     direct_scope_id=direct_scope_id,
-                    limit=max(20, limit),
+                    limit=max(lex_limit, limit),
                 )
+
+                vector_used = False
+                vector_error: str | None = None
+                vector_sims: dict[str, float] = {}
+                vector_model = (getattr(self._settings, "openai_embedding_model", None) or "").strip()
+                min_sim = float(getattr(self._settings, "memory_vector_min_sim", 0.72) or 0.72)
+                top_k = int(getattr(self._settings, "memory_vector_top_k", 30) or 30)
+                scan_limit = int(getattr(self._settings, "memory_vector_scan_limit", 1200) or 1200)
+                if self._memory_vector_enabled() and vector_model:
+                    try:
+                        url = self._embedding_url()
+                        if not url:
+                            raise RuntimeError("missing embedding url")
+                        apikey = self._embedding_api_key()
+                        if not apikey:
+                            raise RuntimeError("missing embedding api key")
+                        qvec = (
+                            await self._llm.embeddings(
+                                url=url,
+                                apikey=apikey,
+                                model=vector_model,
+                                inputs=[query_text],
+                                timeout_s=30.0,
+                            )
+                        )[0]
+                        qnorm = math.sqrt(sum(v * v for v in qvec)) or 0.0
+                        if qnorm > 0:
+                            rows = await self._store.list_memory_summary_embeddings_for_vector_search(
+                                owner_pc_id=pc_id,
+                                include_public=include_public,
+                                direct_scope_id=direct_scope_id,
+                                model=vector_model,
+                                scan_limit=max(50, scan_limit),
+                            )
+                            scored: list[tuple[str, float]] = []
+                            for mid, vec in rows:
+                                if not vec or len(vec) != len(qvec):
+                                    continue
+                                dot = 0.0
+                                vnorm = 0.0
+                                for i, val in enumerate(vec):
+                                    dot += float(val) * float(qvec[i])
+                                    vnorm += float(val) * float(val)
+                                denom = qnorm * (math.sqrt(vnorm) or 0.0)
+                                if denom <= 0:
+                                    continue
+                                sim = dot / denom
+                                if sim >= min_sim:
+                                    scored.append((mid, sim))
+                            scored.sort(key=lambda x: x[1], reverse=True)
+                            for mid, sim in scored[: max(1, min(120, top_k))]:
+                                vector_sims[mid] = float(sim)
+                            vector_used = True
+                    except Exception as exc:  # noqa: BLE001
+                        vector_error = f"{type(exc).__name__}: {exc}"
+
+                candidate_ids: list[str] = []
+                seen_ids: set[str] = set()
+                for m in lex_candidates:
+                    if m.id not in seen_ids:
+                        seen_ids.add(m.id)
+                        candidate_ids.append(m.id)
+                for mid in sorted(vector_sims.keys(), key=lambda k: vector_sims[k], reverse=True):
+                    if mid not in seen_ids:
+                        seen_ids.add(mid)
+                        candidate_ids.append(mid)
+
+                candidates_by_id = {m.id: m for m in lex_candidates}
+                missing_ids = [mid for mid in candidate_ids if mid not in candidates_by_id]
+                if missing_ids:
+                    fetched = await self._store.list_memories_by_ids(missing_ids)
+                    for m in fetched:
+                        candidates_by_id[m.id] = m
+
+                max_kw = max(1, len(cleaned_keywords))
+                w_sim = float(getattr(self._settings, "memory_hybrid_w_sim", 1.0) or 1.0)
+                w_lex = float(getattr(self._settings, "memory_hybrid_w_lex", 0.35) or 0.35)
+                w_score = float(getattr(self._settings, "memory_hybrid_w_score", 0.05) or 0.05)
+                w_pinned = float(getattr(self._settings, "memory_hybrid_w_pinned", 0.2) or 0.2)
+
+                def count_lex_hits(memory: MemoryEntry) -> int:
+                    blob = f"{memory.summary}\n{memory.content}".casefold()
+                    hits = 0
+                    for kw in cleaned_keywords:
+                        if kw.casefold() in blob:
+                            hits += 1
+                    return hits
+
+                ranked: list[tuple[float, str]] = []
+                per_id_meta: dict[str, dict[str, Any]] = {}
+                for mid in candidate_ids:
+                    memory = candidates_by_id.get(mid)
+                    if memory is None:
+                        continue
+                    sim = float(vector_sims.get(mid, 0.0))
+                    hits = count_lex_hits(memory)
+                    lex_ratio = hits / max_kw
+                    score_term = max(-3.0, min(10.0, float(memory.score))) / 10.0
+                    pinned_term = 1.0 if memory.pinned else 0.0
+                    final = (w_sim * sim) + (w_lex * lex_ratio) + (w_score * score_term) + (w_pinned * pinned_term)
+                    ranked.append((final, mid))
+
+                    via: list[str] = []
+                    if mid in vector_sims:
+                        via.append("vec")
+                    if hits > 0:
+                        via.append("lex")
+                    per_id_meta[mid] = {
+                        "final": round(final, 6),
+                        "sim": round(sim, 6),
+                        "lex_hits": hits,
+                        "score": memory.score,
+                        "via": via,
+                    }
+
+                ranked.sort(
+                    key=lambda x: (
+                        x[0],
+                        1 if candidates_by_id.get(x[1]) and candidates_by_id[x[1]].pinned else 0,
+                        candidates_by_id.get(x[1]).score if candidates_by_id.get(x[1]) else 0,
+                        str(candidates_by_id.get(x[1]).updated_at if candidates_by_id.get(x[1]) else ""),
+                    ),
+                    reverse=True,
+                )
+                memories = [candidates_by_id[mid] for _, mid in ranked if mid in candidates_by_id][: max(1, limit)]
 
                 items: list[dict[str, Any]] = []
                 # Keep memory_search lightweight; the v4 executor has a tight total tool-output budget
@@ -1481,12 +1714,39 @@ class TickRunner:
                             "summary": summary,
                             "content": content,
                             "updated_at": memory.updated_at,
+                            "rank": per_id_meta.get(memory.id),
                         }
                     )
                     used_chars += approx
 
                 truncated = omitted > 0
-                return {"ok": True, "data": {"items": items, "truncated": truncated, "omitted_count": omitted}}
+                try:
+                    await self._store.touch_memories([it["id"] for it in items if isinstance(it, dict) and it.get("id")])
+                except Exception:
+                    pass
+
+                return {
+                    "ok": True,
+                    "data": {
+                        "items": items,
+                        "truncated": truncated,
+                        "omitted_count": omitted,
+                        "meta": {
+                            "query_text": query_text,
+                            "candidates": {"lex": len(lex_candidates), "vec": len(vector_sims), "union": len(candidate_ids)},
+                            "vector": {
+                                "enabled": self._memory_vector_enabled(),
+                                "used": vector_used,
+                                "model": vector_model or None,
+                                "min_sim": min_sim,
+                                "top_k": top_k,
+                                "scan_limit": scan_limit,
+                                "error": vector_error,
+                            },
+                            "weights": {"sim": w_sim, "lex": w_lex, "score": w_score, "pinned": w_pinned},
+                        },
+                    },
+                }
 
             return {"ok": False, "error": {"code": "UNKNOWN_TOOL", "message": f"unknown tool: {name}"}}
         except Exception as exc:  # noqa: BLE001
