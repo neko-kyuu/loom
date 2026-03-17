@@ -1,5 +1,6 @@
 import type {
   ForumThread,
+  EventLogItem,
   LlmLogItem,
   LlmLogMeta,
   MemoryEntry,
@@ -110,6 +111,17 @@ export async function getLlmLogs(opts?: { limit?: number }): Promise<{ items: Ll
 
 export async function getLlmLog(logId: string): Promise<{ item: LlmLogItem }> {
   return await jsonFetch(`${httpBase()}/api/llm-logs/${encodeURIComponent(logId)}`);
+}
+
+export async function getEvents(opts?: { limit?: number }): Promise<{ items: EventLogItem[] }> {
+  const q = new URLSearchParams();
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return await jsonFetch(`${httpBase()}/api/events${qs ? `?${qs}` : ""}`);
+}
+
+export async function getEvent(eventId: string): Promise<{ item: EventLogItem }> {
+  return await jsonFetch(`${httpBase()}/api/events/${encodeURIComponent(eventId)}`);
 }
 
 export async function getMemories(opts?: {

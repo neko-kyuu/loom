@@ -155,3 +155,14 @@ export type MemoryListResponse = {
     threshold: number;
   } | null;
 };
+
+export type EventLogItem = {
+  id: string;
+  timestamp: string;
+  location?: string | null;
+  pc_id?: string | null;
+  type: string;
+  summary: string;
+  visibility: "public" | "private";
+  consequences: Record<string, any>;
+};

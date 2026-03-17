@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pin, Plus, RefreshCcw, Save, ShieldAlert, UserSquare2, X, Edit, Trash2, Eraser } from "lucide-react";
-import type { MemoryEntry } from "../types";
-import { createMemory, deleteMemory, getMemories, patchMemory } from "../lib/api";
+import { Pin, Plus, RefreshCcw, Save, ShieldAlert, UserSquare2, X, Edit, Trash2, Eraser, GitMerge } from "lucide-react";
+import type { EventLogItem, MemoryEntry } from "../types";
+import { createMemory, deleteMemory, getEvents, getMemories, patchMemory } from "../lib/api";
 import { formatTime } from "../lib/chatUi";
 
 type PcOption = { id: string; name: string };
@@ -119,6 +119,21 @@ function mergeKeyOf(memory: MemoryEntry | null): string {
   return typeof value === "string" && value.trim() ? value.trim() : "—";
 }
 
+function mergedSourcesCountOf(memory: MemoryEntry | null): number {
+  const merged = memory?.meta?.merged_sources;
+  return Array.isArray(merged) ? merged.length : 0;
+}
+
+function dedupLastAtOf(memory: MemoryEntry | null): string | null {
+  const value = memory?.meta?.dedup_last_at;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function dedupLastSimOf(memory: MemoryEntry | null): number | null {
+  const value = memory?.meta?.dedup_last_sim;
+  return typeof value === "number" ? value : null;
+}
+
 function formatNullableTime(value: string | null | undefined): string {
   return value ? formatTime(value) : "—";
 }
@@ -151,6 +166,10 @@ export default function MemoryDebuggerModal(props: {
   const isEditing = panelMode === "edit" || panelMode === "create";
   const canSaveDraft = !draft.deleted_at;
   const currentMetaMemory = panelMode === "create" ? null : selected;
+  const [showMergeEvents, setShowMergeEvents] = useState(false);
+  const [mergeEventsLoading, setMergeEventsLoading] = useState(false);
+  const [mergeEventsError, setMergeEventsError] = useState<string | null>(null);
+  const [mergeEvents, setMergeEvents] = useState<EventLogItem[]>([]);
 
   const loadMemories = useCallback(async () => {
     if (!props.open) return;
@@ -220,6 +239,33 @@ export default function MemoryDebuggerModal(props: {
     if (!selected || panelMode === "create") return;
     setDraft(copyMemoryToDraft(selected, props.pcs));
   }, [panelMode, props.open, props.pcs, selected]);
+
+  const loadMergeEvents = useCallback(async () => {
+    if (!props.open) return;
+    if (!selectedId) return;
+    setMergeEventsLoading(true);
+    setMergeEventsError(null);
+    try {
+      const res = await getEvents({ limit: 200 });
+      const filtered = (res.items || []).filter((it) => {
+        if (!it || it.type !== "memory_write_dedup_merge") return false;
+        const mergedInto = it.consequences?.merged_into_id;
+        return mergedInto === selectedId;
+      });
+      filtered.sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
+      setMergeEvents(filtered.slice(0, 12));
+    } catch (e: any) {
+      setMergeEventsError(String(e?.message || e));
+    } finally {
+      setMergeEventsLoading(false);
+    }
+  }, [props.open, selectedId]);
+
+  useEffect(() => {
+    if (!props.open) return;
+    if (!showMergeEvents) return;
+    void loadMergeEvents();
+  }, [props.open, showMergeEvents, selectedId, loadMergeEvents]);
 
   const beginCreate = useCallback(
     (kind: ManualKind = "autobiography") => {
@@ -458,6 +504,16 @@ export default function MemoryDebuggerModal(props: {
                     <div className="memoryRowTop">
                     <span className={`memoryBadge kind-${item.kind}`}>{kindLabel(item.kind)}</span>
                     {item.deleted_at ? <span className="memoryBadge state-deleted">已删除</span> : null}
+                    {mergedSourcesCountOf(item) > 0 ? (
+                      <span
+                        className="memoryBadge state-merged"
+                        title={`写入去重合并 ${mergedSourcesCountOf(item)} 次 · 最近 ${formatNullableTime(dedupLastAtOf(item) || undefined)} · sim=${dashText(dedupLastSimOf(item))}`}
+                        style={{ gap: "4px" }}
+                      >
+                        <GitMerge size={12} />
+                        <span>合并×{mergedSourcesCountOf(item)}</span>
+                      </span>
+                    ) : null}
                     <button
                       className={`memoryPinBtn ${item.pinned ? "on" : ""}`}
                       onClick={(e) => {
@@ -686,9 +742,68 @@ export default function MemoryDebuggerModal(props: {
                         <div className="memoryStaticValue">{sourceTypeLabel(currentMetaMemory?.source_type)}</div>
                       </div>
                       <div className="formRow">
+                        <div className="formLabel">合并次数</div>
+                        <div className="memoryStaticValue">{dashText(mergedSourcesCountOf(currentMetaMemory))}</div>
+                      </div>
+                      <div className="formRow">
+                        <div className="formLabel">最近合并</div>
+                        <div className="memoryStaticValue">
+                          {formatNullableTime(dedupLastAtOf(currentMetaMemory) || undefined)}{" "}
+                          {dedupLastSimOf(currentMetaMemory) != null ? <span style={{ opacity: 0.8 }}>（sim={dashText(dedupLastSimOf(currentMetaMemory))}）</span> : null}
+                        </div>
+                      </div>
+                      <div className="formRow">
                         <div className="formLabel">合并键</div>
                         <div className="memoryStaticValue">{mergeKeyOf(currentMetaMemory)}</div>
                       </div>
+                      <div className="formRow">
+                        <div className="formLabel">合并事件</div>
+                        <div className="memoryInlineFields">
+                          <button
+                            className="smallBtn"
+                            type="button"
+                            onClick={() => setShowMergeEvents((v) => !v)}
+                            title="从 /api/events 拉取并筛选 memory_write_dedup_merge"
+                          >
+                            {showMergeEvents ? "隐藏" : "显示"}
+                          </button>
+                          {showMergeEvents ? (
+                            <button
+                              className="smallBtn"
+                              type="button"
+                              disabled={mergeEventsLoading}
+                              onClick={() => void loadMergeEvents()}
+                              title="刷新"
+                            >
+                              <RefreshCcw size={14} />
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                      {showMergeEvents ? (
+                        <div className="memoryEventPanel">
+                          {mergeEventsLoading ? <div className="memoryStaticValue">加载中…</div> : null}
+                          {mergeEventsError ? <div className="memoryStaticValue state-deleted">{mergeEventsError}</div> : null}
+                          {!mergeEventsLoading && !mergeEventsError && !mergeEvents.length ? (
+                            <div className="memoryStaticValue">暂无合并事件</div>
+                          ) : null}
+                          {mergeEvents.map((ev) => (
+                            <div key={ev.id} className="memoryEventRow">
+                              <div className="memoryEventTop">
+                                <span className="memoryBadge state-merged" title={ev.type} style={{ gap: "4px" }}>
+                                  <GitMerge size={12} />
+                                  <span>merge</span>
+                                </span>
+                                <span className="memoryEventTime">{formatNullableTime(ev.timestamp)}</span>
+                                <span className="memoryEventSim" style={{ marginLeft: "auto" }}>
+                                  sim={dashText(ev.consequences?.sim)}
+                                </span>
+                              </div>
+                              <div className="memoryEventSummary">{ev.summary}</div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="formRow">
                         <div className="formLabel">分数</div>
                         <div className="memoryStaticValue">{dashText(currentMetaMemory?.score)}</div>

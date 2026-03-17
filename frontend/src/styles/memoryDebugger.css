@@ -192,6 +192,51 @@
   color: #ff9f9f;
 }
 
+.state-merged {
+  color: #ffcc66;
+  border-color: color-mix(in srgb, #ffcc66 35%, var(--border));
+}
+
+.memoryEventPanel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.memoryEventRow {
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  padding-top: 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.memoryEventRow:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.memoryEventTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.memoryEventTime,
+.memoryEventSim {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.memoryEventSummary {
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.92;
+}
+
 .memoryDetailLayout {
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);

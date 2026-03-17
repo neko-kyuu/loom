@@ -13,6 +13,10 @@
   "openai_dm_model": null,
   "openai_dm_persona": "你是DM（主持人/叙事者）。你负责把用户的话转述给PC们，并补充必要背景；回复简短明确。",
   "openai_memory_model": null,
+  "memory_write_dedup_enabled": true,
+  "memory_write_dedup_min_sim": 0.9,
+  "memory_write_dedup_scan_limit": 200,
+  "memory_write_dedup_max_age_days": 14,
   "openai_pc_models": {
     "pc_1": null,
     "pc_2": null,

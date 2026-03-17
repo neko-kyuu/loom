@@ -481,6 +481,20 @@ async def get_llm_log(log_id: str) -> dict[str, Any]:
     return {"item": item}
 
 
+@app.get("/api/events")
+async def get_events(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+    items = await store.list_events(limit=limit)
+    return {"items": [item.model_dump() for item in items]}
+
+
+@app.get("/api/events/{event_id}")
+async def get_event(event_id: str) -> dict[str, Any]:
+    item = await store.get_event(event_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="not found")
+    return {"item": item.model_dump()}
+
+
 @app.get("/api/memories")
 async def get_memories(
     scope: str | None = None,

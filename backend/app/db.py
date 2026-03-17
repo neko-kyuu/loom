@@ -1216,6 +1216,90 @@ class SqliteStore:
             out.append((mid, vec))
         return out
 
+    async def list_memory_summary_embeddings_for_write_dedup(
+        self,
+        *,
+        scope: str,
+        owner_pc_id: str | None,
+        scope_id: str | None,
+        kind: str,
+        subject_id: str | None,
+        model: str,
+        scan_limit: int,
+        updated_after: str | None,
+    ) -> list[tuple[str, list[float], str]]:
+        scope = str(scope or "").strip()
+        kind = str(kind or "").strip()
+        if scope not in {"pc", "public", "direct"}:
+            return []
+        if not kind:
+            return []
+        model = str(model or "").strip()
+        if not model:
+            return []
+
+        where_parts: list[str] = ["m.deleted_at IS NULL", "m.edit_state='normal'", "m.pinned=0", "e.model=?", "m.scope=?", "m.kind=?"]
+        params: list[str | int] = [model, scope, kind]
+
+        if scope == "pc":
+            if not owner_pc_id:
+                return []
+            where_parts.append("m.owner_pc_id=?")
+            params.append(owner_pc_id)
+            where_parts.append("m.scope_id IS NULL")
+        elif scope == "public":
+            where_parts.append("m.owner_pc_id IS NULL")
+            where_parts.append("m.scope_id IS NULL")
+        else:
+            if not scope_id:
+                return []
+            where_parts.append("m.owner_pc_id IS NULL")
+            where_parts.append("m.scope_id=?")
+            params.append(scope_id)
+
+        if subject_id is None:
+            where_parts.append("m.subject_id IS NULL")
+        else:
+            where_parts.append("m.subject_id=?")
+            params.append(subject_id)
+
+        if isinstance(updated_after, str) and updated_after.strip():
+            where_parts.append("m.updated_at>=?")
+            params.append(updated_after.strip())
+
+        limit = max(1, int(scan_limit))
+        where_sql = " WHERE " + " AND ".join(where_parts)
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT m.id AS id, e.dims AS dims, e.embedding_blob AS embedding_blob, m.meta_json AS meta_json "
+                "FROM memories m JOIN memory_summary_embeddings e ON e.memory_id=m.id "
+                f"{where_sql} "
+                "ORDER BY m.updated_at DESC, m.score DESC LIMIT ?",
+                (*params, limit),
+            )
+            rows = await cur.fetchall()
+
+        out: list[tuple[str, list[float], str]] = []
+        for row in rows:
+            mid = str(row["id"] or "").strip()
+            if not mid:
+                continue
+            raw_blob = row["embedding_blob"]
+            try:
+                dims = int(row["dims"])
+            except Exception:
+                dims = 0
+            if not isinstance(raw_blob, (bytes, bytearray, memoryview)) or dims <= 0:
+                continue
+            vec = _unpack_embedding_f32(bytes(raw_blob), dims=dims)
+            if vec is None:
+                continue
+            meta_json = row["meta_json"]
+            out.append((mid, vec, meta_json if isinstance(meta_json, str) else ""))
+        return out
+
     async def search_memories(
         self,
         *,
@@ -1502,6 +1586,18 @@ class SqliteStore:
         events = [Event.model_validate_json(r["payload"]) for r in rows]
         events.reverse()
         return events
+
+    async def get_event(self, event_id: str) -> Event | None:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT payload FROM events WHERE id=?",
+                (event_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return Event.model_validate_json(row["payload"])
 
     @staticmethod
     def _utc_now_iso() -> str:
