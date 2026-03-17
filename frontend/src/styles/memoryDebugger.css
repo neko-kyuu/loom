@@ -282,6 +282,7 @@
   padding: 8px 10px;
   line-height: 14px;
   outline: none;
+  word-break: break-all;
 }
 
 .memoryContentPanel {

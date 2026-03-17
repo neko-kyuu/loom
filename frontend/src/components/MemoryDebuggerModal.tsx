@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pin, Plus, RefreshCcw, Save, ShieldAlert, UserSquare2, X, Edit, Trash2, Eraser, GitMerge } from "lucide-react";
+import { Pin, Plus, RefreshCcw, Save, ShieldAlert, UserSquare2, X, Edit, Trash2, Eraser, GitMerge, ChevronDown, ChevronUp } from "lucide-react";
 import type { EventLogItem, MemoryEntry } from "../types";
 import { createMemory, deleteMemory, getEvents, getMemories, patchMemory } from "../lib/api";
 import { formatTime } from "../lib/chatUi";
@@ -158,6 +158,7 @@ export default function MemoryDebuggerModal(props: {
   const [showDeleted, setShowDeleted] = useState(false);
   const [editStateFilter, setEditStateFilter] = useState<string>("");
   const [sourceTypeFilter, setSourceTypeFilter] = useState<string>("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const [draft, setDraft] = useState<Draft>(() => makeEmptyDraft(props.pcs));
   const [panelMode, setPanelMode] = useState<PanelMode>("empty");
@@ -209,6 +210,28 @@ export default function MemoryDebuggerModal(props: {
     if (value == null) return "-";
     if (typeof value === "string") return value.trim() ? value : "-";
     return String(value);
+  }, []);
+
+  const filtersActive = useMemo(() => {
+    return Boolean(
+      scopeFilter ||
+        kindFilter ||
+        ownerPcFilter ||
+        editStateFilter ||
+        sourceTypeFilter ||
+        pinnedOnly ||
+        showDeleted
+    );
+  }, [scopeFilter, kindFilter, ownerPcFilter, editStateFilter, sourceTypeFilter, pinnedOnly, showDeleted]);
+
+  const resetFilters = useCallback(() => {
+    setScopeFilter("");
+    setKindFilter("");
+    setOwnerPcFilter("");
+    setPinnedOnly(false);
+    setShowDeleted(false);
+    setEditStateFilter("");
+    setSourceTypeFilter("");
   }, []);
 
   useEffect(() => {
@@ -443,46 +466,68 @@ export default function MemoryDebuggerModal(props: {
               </button>
             </div>
             <div className="memoryFilters">
-              <select className="customSelect" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)}>
-                <option value="">全部范围</option>
-                <option value="pc">角色私有</option>
-                <option value="public">公共</option>
-                <option value="direct">私聊</option>
-              </select>
-              <select className="customSelect" value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}>
-                <option value="">全部类型</option>
-                {ALL_KINDS.map((kind) => (
-                  <option key={kind} value={kind}>{kindLabel(kind)}</option>
-                ))}
-              </select>
-              <select className="customSelect" value={ownerPcFilter} onChange={(e) => setOwnerPcFilter(e.target.value)}>
-                <option value="">全部 PC</option>
-                {props.pcs.map((pc) => (
-                  <option key={pc.id} value={pc.id}>{pc.name}</option>
-                ))}
-              </select>
-              <select className="customSelect" value={editStateFilter} onChange={(e) => setEditStateFilter(e.target.value)}>
-                <option value="">全部编辑状态</option>
-                <option value="normal">正常</option>
-                <option value="user_edited">人工修改</option>
-                <option value="user_locked">人工锁定</option>
-                <option value="deleted">已删除</option>
-              </select>
-              <select className="customSelect" value={sourceTypeFilter} onChange={(e) => setSourceTypeFilter(e.target.value)}>
-                <option value="">全部来源</option>
-                <option value="manual">手工</option>
-                <option value="llm_write">模型写入</option>
-                <option value="deterministic_write">规则写入</option>
-                <option value="migrated">迁移导入</option>
-              </select>
-              <label className="memoryCheck">
-                <input type="checkbox" checked={pinnedOnly} onChange={(e) => setPinnedOnly(e.target.checked)} />
-                <span>仅 pinned</span>
-              </label>
-              <label className="memoryCheck">
-                <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
-                <span>显示已删除</span>
-              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <button
+                  className="smallBtn"
+                  type="button"
+                  onClick={() => setFiltersOpen((v) => !v)}
+                  title={filtersOpen ? "收起筛选" : "展开筛选"}
+                  style={{ gap: "6px" }}
+                >
+                  {filtersOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                  <span>{filtersActive ? "筛选（已启用）" : "筛选"}</span>
+                </button>
+                {filtersActive ? (
+                  <button className="smallBtn" type="button" onClick={resetFilters} title="清空筛选">
+                    <Eraser size={14} />
+                  </button>
+                ) : null}
+              </div>
+
+              {filtersOpen ? (
+                <>
+                  <select className="customSelect" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)}>
+                    <option value="">全部范围</option>
+                    <option value="pc">角色私有</option>
+                    <option value="public">公共</option>
+                    <option value="direct">私聊</option>
+                  </select>
+                  <select className="customSelect" value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}>
+                    <option value="">全部类型</option>
+                    {ALL_KINDS.map((kind) => (
+                      <option key={kind} value={kind}>{kindLabel(kind)}</option>
+                    ))}
+                  </select>
+                  <select className="customSelect" value={ownerPcFilter} onChange={(e) => setOwnerPcFilter(e.target.value)}>
+                    <option value="">全部 PC</option>
+                    {props.pcs.map((pc) => (
+                      <option key={pc.id} value={pc.id}>{pc.name}</option>
+                    ))}
+                  </select>
+                  <select className="customSelect" value={editStateFilter} onChange={(e) => setEditStateFilter(e.target.value)}>
+                    <option value="">全部编辑状态</option>
+                    <option value="normal">正常</option>
+                    <option value="user_edited">人工修改</option>
+                    <option value="user_locked">人工锁定</option>
+                    <option value="deleted">已删除</option>
+                  </select>
+                  <select className="customSelect" value={sourceTypeFilter} onChange={(e) => setSourceTypeFilter(e.target.value)}>
+                    <option value="">全部来源</option>
+                    <option value="manual">手工</option>
+                    <option value="llm_write">模型写入</option>
+                    <option value="deterministic_write">规则写入</option>
+                    <option value="migrated">迁移导入</option>
+                  </select>
+                  <label className="memoryCheck">
+                    <input type="checkbox" checked={pinnedOnly} onChange={(e) => setPinnedOnly(e.target.checked)} />
+                    <span>仅 pinned</span>
+                  </label>
+                  <label className="memoryCheck">
+                    <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
+                    <span>显示已删除</span>
+                  </label>
+                </>
+              ) : null}
             </div>
             <div className="memoryList">
               {loading ? <div className="memoryEmpty">加载中…</div> : null}
