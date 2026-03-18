@@ -343,6 +343,19 @@ class TickRunner:
         content = content.replace("\n", "\\n")
         return f"{who}: {content}"
 
+    def _format_pcs_personas_for_prompt(self) -> str:
+        if not self._engine.pcs:
+            return ""
+        blocks: list[str] = []
+        for idx, p in enumerate(self._engine.pcs):
+            name = (p.name or p.id or "").strip() or p.id
+            persona = (p.persona or "").strip() or f"你是{name}。"
+            letter = chr(ord("A") + idx) if 0 <= idx < 26 else str(idx + 1)
+            blocks.append(f"{name}（{p.id}）:")
+            blocks.append(persona)
+            blocks.append("")
+        return "\n".join(blocks).strip()
+
     @staticmethod
     def _trim_memory_text(text: str, *, max_len: int) -> str:
         cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -833,6 +846,7 @@ class TickRunner:
                 "max_items": str(max(1, int(self._settings.memory_write_max_items))),
                 "summary_max_chars": str(max(1, int(self._settings.memory_write_summary_chars))),
                 "content_max_chars": str(max(1, int(self._settings.memory_write_content_chars))),
+                "pcs_personas": self._format_pcs_personas_for_prompt(),
                 "action_type": action_type,
                 "scope_hint": scope_hint,
                 "actor_name": actor_name,
