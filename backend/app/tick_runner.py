@@ -22,6 +22,7 @@ from .actions import (
     validate_action,
 )
 from .db import SqliteStore
+from .doc_search import DocSearchService
 from .engine import DemoEngine
 from .llm import LlmService, openai_chat_completions_url, openai_embeddings_url, parse_llm_response
 from .models import Actor, Event, ForumThread, MemoryEntry, Message, PcActivity, TickRecord, utc_now_iso
@@ -81,6 +82,7 @@ class TickRunner:
         engine: DemoEngine,
         settings: Settings,
         llm: LlmService | None = None,
+        doc_search: DocSearchService | None = None,
         tick_s: float = 60.0,
         dm_digest_s: float = 600.0,
         dm_bootstrap_lookback_s: float = 600.0,
@@ -91,6 +93,7 @@ class TickRunner:
         self._engine = engine
         self._settings = settings
         self._llm = llm
+        self._doc_search = doc_search
         self._tick_s = tick_s
         self._dm_digest_s = dm_digest_s
         self._dm_bootstrap_lookback_s = dm_bootstrap_lookback_s
@@ -1395,6 +1398,23 @@ class TickRunner:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "doc_search",
+                    "description": "Search public reference docs (rules/setting). Returns short titled snippets (bounded).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query_text": {"type": "string"},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+                            "text_chars": {"type": "integer", "minimum": 120, "maximum": 1200, "default": 600},
+                            "hops": {"type": "integer", "minimum": 0, "maximum": 1, "default": 0},
+                        },
+                        "required": ["query_text"],
+                    },
+                },
+            },
         ]
 
     async def _v4_list_threads_digest(
@@ -1818,6 +1838,35 @@ class TickRunner:
                     "content_truncated": truncated,
                 }
                 return {"ok": True, "data": {"message": packed}, "meta": meta}
+
+            if name == "doc_search":
+                query_text = self._clean_str(args.get("query_text"))
+                limit_raw = args.get("limit")
+                text_chars_raw = args.get("text_chars")
+                hops_raw = args.get("hops")
+
+                if not query_text:
+                    return {"ok": False, "error": {"code": "BAD_ARGS", "message": "query_text required"}}
+
+                limit = 5
+                if isinstance(limit_raw, (int, float)):
+                    limit = int(limit_raw)
+                limit = max(1, min(8, limit))
+
+                text_chars = 600
+                if isinstance(text_chars_raw, (int, float)):
+                    text_chars = int(text_chars_raw)
+                text_chars = max(120, min(1200, text_chars))
+
+                hops = 0
+                if isinstance(hops_raw, (int, float)):
+                    hops = int(hops_raw)
+                hops = max(0, min(1, hops))
+
+                if self._doc_search is None:
+                    return {"ok": True, "data": {"enabled": False, "results": []}, "meta": {"reason": "not_configured"}}
+
+                return await self._doc_search.search(query_text=query_text, limit=limit, text_chars=text_chars, hops=hops)
 
             if name == "memory_search":
                 tool_pc_id = self._clean_str(args.get("pc_id"))

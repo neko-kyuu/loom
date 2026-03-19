@@ -76,6 +76,21 @@ class Settings(BaseSettings):
     # Keep it large enough to allow memory_search + one context fetch.
     v4_max_total_tool_output_chars: int = 60_000
 
+    # v5: public docs (doc_search) via MCP GraphRAG
+    doc_search_enabled: bool = False
+    # MCP stdio command, e.g. ["python", "server.py", "--config", "config.json"]
+    doc_search_mcp_command: list[str] | None = None
+    doc_search_mcp_cwd: str | None = None
+    doc_search_mcp_init_timeout_s: float = 15.0
+    doc_search_mcp_request_timeout_s: float = 45.0
+
+    doc_search_min_score: float | None = None
+    doc_search_allowed_path_prefixes: list[str] = Field(default_factory=list)
+    doc_search_max_limit: int = 8
+    doc_search_max_text_chars: int = 1200
+    doc_search_max_results: int = 15
+    doc_search_max_hops: int = 1
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from .db import SqliteStore
 from .demo_forum import DemoForumSeedConfig, build_demo_forum_seed
+from .doc_search import DocSearchService
 from .engine import DemoEngine, ForumChannel
 from .llm import LlmService
 from .models import Actor, Event, MemoryEntry, Message, WsClientToServer
@@ -25,15 +26,16 @@ from .tick_runner import TickRunner
 from .ws import ConnectionManager
 
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 store = SqliteStore(settings.sqlite_path)
 ws_manager = ConnectionManager()
 llm = LlmService(store=store)
 engine = DemoEngine(settings=settings, store=store, ws=ws_manager, llm=llm)
-tick_runner = TickRunner(store=store, ws=ws_manager, engine=engine, settings=settings, llm=llm, tick_s=60.0)
+doc_search = DocSearchService(store=store, settings=settings, logger=logger)
+tick_runner = TickRunner(store=store, ws=ws_manager, engine=engine, settings=settings, llm=llm, doc_search=doc_search, tick_s=60.0)
 
 app = FastAPI(title=settings.app_name)
-logger = logging.getLogger(__name__)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
@@ -46,6 +48,8 @@ app.add_middleware(
 @app.on_event("startup")
 async def _startup() -> None:
     await store.init()
+    # Best-effort refresh of the "public docs" index (via MCP GraphRAG). This is safe when disabled.
+    asyncio.create_task(doc_search.refresh_public_index(), name="doc-public-index-refresh")
     profiles_json = await store.get_setting_json("profiles_state")
     if profiles_json:
         try:
@@ -177,6 +181,11 @@ async def _startup() -> None:
     await tick_runner.start()
 
 
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await doc_search.close()
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {"ok": True}
@@ -192,6 +201,40 @@ async def get_settings_state() -> dict[str, Any]:
         "profiles_state": json.loads(profiles_json) if profiles_json else None,
         "channels_state": json.loads(channels_json) if channels_json else None,
     }
+
+
+@app.get("/api/docs/index")
+async def get_doc_public_index() -> dict[str, Any]:
+    raw = await store.get_setting_json("doc_public_index")
+    return {"ok": True, "index": json.loads(raw) if raw else None}
+
+
+@app.post("/api/docs/index/refresh")
+async def refresh_doc_public_index() -> dict[str, Any]:
+    payload = await doc_search.refresh_public_index()
+    return {"ok": True, "index": payload}
+
+
+@app.post("/api/docs/search")
+async def api_doc_search(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    query_text = payload.get("query_text")
+    if not isinstance(query_text, str):
+        raise HTTPException(status_code=400, detail="query_text required")
+    limit_raw = payload.get("limit", 5)
+    text_chars_raw = payload.get("text_chars", 600)
+    hops_raw = payload.get("hops", 0)
+
+    def _to_int(v: Any, default: int) -> int:
+        if isinstance(v, (int, float)):
+            return int(v)
+        return default
+
+    return await doc_search.search(
+        query_text=query_text,
+        limit=_to_int(limit_raw, 5),
+        text_chars=_to_int(text_chars_raw, 600),
+        hops=_to_int(hops_raw, 0),
+    )
 
 
 @app.put("/api/settings/appearance")
