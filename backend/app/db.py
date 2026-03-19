@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import array
 import sys
+import hashlib
 from datetime import datetime, timezone
 from collections.abc import Iterable
 
@@ -40,6 +41,46 @@ def _unpack_embedding_f32(blob: bytes, *, dims: int) -> list[float] | None:
     if sys.byteorder == "big":
         arr.byteswap()
     return [float(x) for x in arr]
+
+
+_SQLITE_VEC_MODULE = None
+_SQLITE_VEC_IMPORT_ERROR: str | None = None
+
+
+def _get_sqlite_vec_module():
+    global _SQLITE_VEC_MODULE, _SQLITE_VEC_IMPORT_ERROR
+    if _SQLITE_VEC_MODULE is not None:
+        return _SQLITE_VEC_MODULE
+    if _SQLITE_VEC_IMPORT_ERROR is not None:
+        return None
+    try:
+        import sqlite_vec  # type: ignore
+
+        _SQLITE_VEC_MODULE = sqlite_vec
+        return _SQLITE_VEC_MODULE
+    except Exception as exc:  # noqa: BLE001
+        _SQLITE_VEC_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+        return None
+
+
+def _vec_table_name(*, model: str, dims: int) -> str:
+    m = (model or "").strip()
+    h = hashlib.sha256(m.encode("utf-8")).hexdigest()[:12] if m else "nomodel"
+    d = max(1, int(dims))
+    # Versioned table name (virtual tables are awkward to ALTER).
+    return f"memory_summary_vec0_v1_{d}_{h}"
+
+
+def _meta_req_text(v: str | None) -> str:
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return ""
+
+
+def _meta_opt_text(v: str | None) -> str | None:
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return None
 
 
 SCHEMA_SQL = """
@@ -203,6 +244,64 @@ CREATE TABLE IF NOT EXISTS assets (
 class SqliteStore:
     def __init__(self, path: str) -> None:
         self._path = path
+
+    async def _try_load_sqlite_vec(self, db: aiosqlite.Connection) -> tuple[bool, str | None]:
+        mod = _get_sqlite_vec_module()
+        if mod is None:
+            return False, _SQLITE_VEC_IMPORT_ERROR or "sqlite_vec_not_installed"
+
+        conn = getattr(db, "_conn", None)
+        if conn is None:
+            return False, "missing_sqlite3_connection"
+        try:
+            conn.enable_load_extension(True)
+            mod.load(conn)
+            conn.enable_load_extension(False)
+            return True, None
+        except Exception as exc:  # noqa: BLE001
+            try:
+                conn.enable_load_extension(False)
+            except Exception:
+                pass
+            return False, f"{type(exc).__name__}: {exc}"
+
+    async def _ensure_memory_summary_vec_table(self, db: aiosqlite.Connection, *, table: str, dims: int) -> None:
+        dims = max(1, int(dims))
+        # NOTE: vec0 requires fixed dimensions at table creation time.
+        await db.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING vec0("
+            "memory_id TEXT PRIMARY KEY, "
+            "model TEXT, "
+            "scope TEXT, "
+            "owner_pc_id TEXT, "
+            "scope_id TEXT, "
+            "kind TEXT, "
+            "subject_id TEXT, "
+            "updated_at TEXT, "
+            f"embedding float[{dims}] distance_metric=cosine"
+            ")"
+        )
+
+    @staticmethod
+    async def _sqlite_table_exists(db: aiosqlite.Connection, *, table: str) -> bool:
+        try:
+            cur = await db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table,),
+            )
+            row = await cur.fetchone()
+            return bool(row)
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _sqlite_table_has_any_rows(db: aiosqlite.Connection, *, table: str) -> bool:
+        try:
+            cur = await db.execute(f"SELECT 1 FROM {table} LIMIT 1")
+            row = await cur.fetchone()
+            return bool(row)
+        except Exception:
+            return False
 
     async def init(self) -> None:
         async with aiosqlite.connect(self._path) as db:
@@ -961,6 +1060,7 @@ class SqliteStore:
                 existing_by_id = {row["id"]: self._memory_from_row(row) for row in rows}
 
             merged_items = [self._merge_memory_upsert(existing_by_id.get(memory.id), memory) for memory in items]
+            merged_by_id = {m.id: m for m in merged_items if isinstance(m.id, str) and m.id.strip()}
             rows = [
                 (
                     memory.id,
@@ -1005,6 +1105,85 @@ class SqliteStore:
                 rows,
             )
             await db.commit()
+
+            # Keep sqlite-vec metadata in sync when memory attributes change (scope/kind/subject_id/updated_at/deleted_at).
+            try:
+                loaded, _ = await self._try_load_sqlite_vec(db)
+                if loaded and ids:
+                    placeholders = ", ".join("?" for _ in ids)
+                    cur = await db.execute(
+                        f"SELECT memory_id, model, dims, embedding_blob "
+                        f"FROM memory_summary_embeddings WHERE memory_id IN ({placeholders})",
+                        ids,
+                    )
+                    emb_rows = await cur.fetchall()
+
+                    upserts_by_table: dict[
+                        tuple[str, int],
+                        list[tuple[str, str, str, str | None, str | None, str, str | None, str, bytes]],
+                    ] = {}
+                    deletes_by_table: dict[tuple[str, int], list[tuple[str]]] = {}
+
+                    for r in emb_rows:
+                        mid = str(r["memory_id"] or "").strip()
+                        if not mid:
+                            continue
+                        mem = merged_by_id.get(mid)
+                        if mem is None:
+                            continue
+                        try:
+                            dims = int(r["dims"])
+                        except Exception:
+                            continue
+                        row_model = str(r["model"] or "").strip()
+                        raw_blob = r["embedding_blob"]
+                        if not row_model or dims <= 0 or not isinstance(raw_blob, (bytes, bytearray, memoryview)):
+                            continue
+                        blob = bytes(raw_blob)
+                        if len(blob) != dims * 4:
+                            continue
+
+                        table = _vec_table_name(model=row_model, dims=dims)
+                        key = (table, dims)
+
+                        if isinstance(mem.deleted_at, str) and mem.deleted_at.strip():
+                            deletes_by_table.setdefault(key, []).append((mid,))
+                            continue
+
+                        upserts_by_table.setdefault(key, []).append(
+                            (
+                                mid,
+                                row_model,
+                                _meta_req_text(mem.scope),
+                                _meta_opt_text(mem.owner_pc_id),
+                                _meta_opt_text(mem.scope_id),
+                                _meta_req_text(mem.kind),
+                                _meta_opt_text(mem.subject_id),
+                                _meta_req_text(mem.updated_at),
+                                blob,
+                            )
+                        )
+
+                    for (table, dims), vec_rows in upserts_by_table.items():
+                        await self._ensure_memory_summary_vec_table(db, table=table, dims=dims)
+                        await db.executemany(
+                            f"INSERT INTO {table}(memory_id, model, scope, owner_pc_id, scope_id, kind, subject_id, updated_at, embedding) "
+                            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT(memory_id) DO UPDATE SET "
+                            "model=excluded.model, scope=excluded.scope, owner_pc_id=excluded.owner_pc_id, scope_id=excluded.scope_id, "
+                            "kind=excluded.kind, subject_id=excluded.subject_id, updated_at=excluded.updated_at, embedding=excluded.embedding",
+                            vec_rows,
+                        )
+                    for (table, dims), del_rows in deletes_by_table.items():
+                        if not await self._sqlite_table_exists(db, table=table):
+                            continue
+                        await db.executemany(
+                            f"DELETE FROM {table} WHERE memory_id = ?",
+                            del_rows,
+                        )
+                    await db.commit()
+            except Exception:
+                pass
 
     async def get_memory(self, memory_id: str) -> MemoryEntry | None:
         async with aiosqlite.connect(self._path) as db:
@@ -1160,6 +1339,272 @@ class SqliteStore:
                 rows,
             )
             await db.commit()
+
+            try:
+                loaded, _ = await self._try_load_sqlite_vec(db)
+                if loaded:
+                    ids = [r[0] for r in rows]
+                    placeholders = ", ".join("?" for _ in ids)
+                    db.row_factory = aiosqlite.Row
+                    cur = await db.execute(
+                        f"SELECT id, scope, owner_pc_id, scope_id, kind, subject_id, updated_at "
+                        f"FROM memories WHERE id IN ({placeholders})",
+                        ids,
+                    )
+                    meta_rows = await cur.fetchall()
+                    meta_by_id = {str(r["id"]): r for r in meta_rows if r and r.get("id")}
+
+                    vec_rows_by_table: dict[
+                        tuple[str, int],
+                        list[tuple[str, str, str, str | None, str | None, str, str | None, str, bytes]],
+                    ] = {}
+                    for memory_id, row_model, dims, _sha, packed, _ua in rows:
+                        meta = meta_by_id.get(memory_id)
+                        if meta is None:
+                            continue
+                        table = _vec_table_name(model=row_model, dims=dims)
+                        key = (table, int(dims))
+                        vec_rows_by_table.setdefault(key, []).append(
+                            (
+                                memory_id,
+                                row_model,
+                                _meta_req_text(meta["scope"]),
+                                _meta_opt_text(meta["owner_pc_id"]),
+                                _meta_opt_text(meta["scope_id"]),
+                                _meta_req_text(meta["kind"]),
+                                _meta_opt_text(meta["subject_id"]),
+                                _meta_req_text(meta["updated_at"]),
+                                packed,
+                            )
+                        )
+
+                    for (table, dims), vec_rows in vec_rows_by_table.items():
+                        await self._ensure_memory_summary_vec_table(db, table=table, dims=dims)
+                        await db.executemany(
+                            f"INSERT INTO {table}(memory_id, model, scope, owner_pc_id, scope_id, kind, subject_id, updated_at, embedding) "
+                            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT(memory_id) DO UPDATE SET "
+                            "model=excluded.model, scope=excluded.scope, owner_pc_id=excluded.owner_pc_id, scope_id=excluded.scope_id, "
+                            "kind=excluded.kind, subject_id=excluded.subject_id, updated_at=excluded.updated_at, embedding=excluded.embedding",
+                            vec_rows,
+                        )
+                    await db.commit()
+            except Exception:
+                pass
+
+    async def knn_memory_summary_similarities(
+        self,
+        *,
+        owner_pc_id: str | None,
+        include_public: bool,
+        direct_scope_id: str | None,
+        model: str,
+        query_vector: list[float],
+        k: int,
+    ) -> list[tuple[str, float]] | None:
+        model = (model or "").strip()
+        if not model:
+            return None
+        if not isinstance(query_vector, list) or not query_vector:
+            return None
+        mod = _get_sqlite_vec_module()
+        if mod is not None and hasattr(mod, "serialize_float32"):
+            packed = mod.serialize_float32(query_vector)
+        else:
+            packed = _pack_embedding_f32(query_vector)
+        if packed is None:
+            return None
+        dims = len(query_vector)
+        table = _vec_table_name(model=model, dims=dims)
+        k = max(1, min(500, int(k)))
+
+        async with aiosqlite.connect(self._path) as db:
+            loaded, _ = await self._try_load_sqlite_vec(db)
+            if not loaded:
+                return None
+            if not await self._sqlite_table_exists(db, table=table):
+                return None
+            if not await self._sqlite_table_has_any_rows(db, table=table):
+                return None
+
+            queries: list[tuple[str, tuple[object, ...]]] = []
+            if owner_pc_id:
+                queries.append(
+                    (
+                        f"SELECT memory_id, distance FROM {table} "
+                        "WHERE embedding MATCH ? AND k = ? AND model = ? "
+                        "AND scope = 'pc' AND owner_pc_id = ? AND scope_id IS NULL "
+                        "ORDER BY distance",
+                        (packed, k, model, owner_pc_id),
+                    )
+                )
+            if include_public:
+                queries.append(
+                    (
+                        f"SELECT memory_id, distance FROM {table} "
+                        "WHERE embedding MATCH ? AND k = ? AND model = ? "
+                        "AND scope = 'public' AND owner_pc_id IS NULL AND scope_id IS NULL "
+                        "ORDER BY distance",
+                        (packed, k, model),
+                    )
+                )
+            if direct_scope_id:
+                queries.append(
+                    (
+                        f"SELECT memory_id, distance FROM {table} "
+                        "WHERE embedding MATCH ? AND k = ? AND model = ? "
+                        "AND scope = 'direct' AND owner_pc_id IS NULL AND scope_id = ? "
+                        "ORDER BY distance",
+                        (packed, k, model, direct_scope_id),
+                    )
+                )
+
+            best_dist: dict[str, float] = {}
+            db.row_factory = aiosqlite.Row
+            for sql, params in queries:
+                cur = await db.execute(sql, params)
+                rows = await cur.fetchall()
+                for r in rows:
+                    mid = str(r["memory_id"] or "").strip()
+                    if not mid:
+                        continue
+                    try:
+                        dist = float(r["distance"])
+                    except Exception:
+                        continue
+                    prev = best_dist.get(mid)
+                    if prev is None or dist < prev:
+                        best_dist[mid] = dist
+
+        # cosine distance -> cosine similarity (approx): sim = 1 - dist
+        out: list[tuple[str, float]] = []
+        for mid, dist in best_dist.items():
+            out.append((mid, 1.0 - float(dist)))
+        out.sort(key=lambda x: x[1], reverse=True)
+        return out[:k]
+
+    async def knn_memory_summary_candidates_for_write_dedup(
+        self,
+        *,
+        scope: str,
+        owner_pc_id: str | None,
+        scope_id: str | None,
+        kind: str,
+        subject_id: str | None,
+        model: str,
+        query_vector: list[float],
+        scan_limit: int,
+        updated_after: str | None,
+    ) -> list[tuple[str, float, str]] | None:
+        model = (model or "").strip()
+        if not model:
+            return None
+        if not isinstance(query_vector, list) or not query_vector:
+            return None
+        mod = _get_sqlite_vec_module()
+        if mod is not None and hasattr(mod, "serialize_float32"):
+            packed = mod.serialize_float32(query_vector)
+        else:
+            packed = _pack_embedding_f32(query_vector)
+        if packed is None:
+            return None
+        dims = len(query_vector)
+        table = _vec_table_name(model=model, dims=dims)
+        scan_limit = max(1, min(2000, int(scan_limit)))
+
+        scope = (scope or "").strip()
+        kind = (kind or "").strip()
+        if scope not in {"pc", "public", "direct"}:
+            return None
+        if not kind:
+            return None
+
+        where_parts = [
+            "embedding MATCH ?",
+            "k = ?",
+            "model = ?",
+            "kind = ?",
+        ]
+        params: list[object] = [packed, scan_limit, model, kind]
+
+        if scope == "pc":
+            if not owner_pc_id:
+                return None
+            where_parts.append("scope = 'pc'")
+            where_parts.append("owner_pc_id = ?")
+            where_parts.append("scope_id IS NULL")
+            params.append(owner_pc_id)
+        elif scope == "public":
+            where_parts.append("scope = 'public'")
+            where_parts.append("owner_pc_id IS NULL")
+            where_parts.append("scope_id IS NULL")
+        else:
+            if not scope_id:
+                return None
+            where_parts.append("scope = 'direct'")
+            where_parts.append("owner_pc_id IS NULL")
+            where_parts.append("scope_id = ?")
+            params.append(scope_id)
+
+        if subject_id is None:
+            where_parts.append("subject_id IS NULL")
+        else:
+            where_parts.append("subject_id = ?")
+            params.append(subject_id)
+
+        if isinstance(updated_after, str) and updated_after.strip():
+            where_parts.append("updated_at >= ?")
+            params.append(updated_after.strip())
+
+        where_sql = " AND ".join(where_parts)
+
+        async with aiosqlite.connect(self._path) as db:
+            loaded, _ = await self._try_load_sqlite_vec(db)
+            if not loaded:
+                return None
+            if not await self._sqlite_table_exists(db, table=table):
+                return None
+            if not await self._sqlite_table_has_any_rows(db, table=table):
+                return None
+
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                f"SELECT memory_id, distance FROM {table} WHERE {where_sql} ORDER BY distance",
+                tuple(params),
+            )
+            rows = await cur.fetchall()
+
+            ids: list[str] = []
+            sim_by_id: dict[str, float] = {}
+            for r in rows:
+                mid = str(r["memory_id"] or "").strip()
+                if not mid:
+                    continue
+                try:
+                    dist = float(r["distance"])
+                except Exception:
+                    continue
+                if mid not in sim_by_id:
+                    ids.append(mid)
+                    sim_by_id[mid] = 1.0 - float(dist)
+
+            if not ids:
+                return []
+
+            placeholders = ", ".join("?" for _ in ids)
+            cur = await db.execute(
+                f"SELECT id, meta_json FROM memories WHERE deleted_at IS NULL AND id IN ({placeholders})",
+                ids,
+            )
+            meta_rows = await cur.fetchall()
+            meta_by_id = {str(r["id"]): str(r["meta_json"] or "") for r in meta_rows if r and r.get("id")}
+
+        out: list[tuple[str, float, str]] = []
+        for mid in ids:
+            if mid not in meta_by_id:
+                continue
+            out.append((mid, float(sim_by_id.get(mid, 0.0)), meta_by_id.get(mid, "")))
+        return out
 
     async def list_memory_summary_embeddings_for_vector_search(
         self,

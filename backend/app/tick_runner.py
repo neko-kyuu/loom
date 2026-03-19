@@ -1101,16 +1101,32 @@ class TickRunner:
                         merged_by_id[entry.id] = entry
                     continue
 
-                candidates = await self._store.list_memory_summary_embeddings_for_write_dedup(
+                knn = await self._store.knn_memory_summary_candidates_for_write_dedup(
                     scope=entry.scope,
                     owner_pc_id=entry.owner_pc_id,
                     scope_id=entry.scope_id,
                     kind=entry.kind,
                     subject_id=entry.subject_id,
                     model=model,
+                    query_vector=vec,
                     scan_limit=scan_limit,
                     updated_after=updated_after,
                 )
+                candidates: list[tuple[str, list[float], str]] = []
+                candidates_knn: list[tuple[str, float, str]] = []
+                if knn is not None:
+                    candidates_knn = knn
+                else:
+                    candidates = await self._store.list_memory_summary_embeddings_for_write_dedup(
+                        scope=entry.scope,
+                        owner_pc_id=entry.owner_pc_id,
+                        scope_id=entry.scope_id,
+                        kind=entry.kind,
+                        subject_id=entry.subject_id,
+                        model=model,
+                        scan_limit=scan_limit,
+                        updated_after=updated_after,
+                    )
 
                 # Optional extra constraints for recent_event: require same conversation/thread if present.
                 conv_required: str | None = None
@@ -1123,22 +1139,39 @@ class TickRunner:
 
                 best_id: str | None = None
                 best_sim = 0.0
-                for mid, cvec, meta_json in candidates:
-                    if mid == entry.id:
-                        continue
-                    if conv_required or thread_required:
-                        try:
-                            meta = json.loads(meta_json or "{}") if isinstance(meta_json, str) else {}
-                        except Exception:  # noqa: BLE001
-                            meta = {}
-                        if conv_required and meta.get("conversation_id") != conv_required:
+                if candidates_knn:
+                    for mid, sim, meta_json in candidates_knn:
+                        if mid == entry.id:
                             continue
-                        if thread_required and meta.get("thread_id") != thread_required:
+                        if conv_required or thread_required:
+                            try:
+                                meta = json.loads(meta_json or "{}") if isinstance(meta_json, str) else {}
+                            except Exception:  # noqa: BLE001
+                                meta = {}
+                            if conv_required and meta.get("conversation_id") != conv_required:
+                                continue
+                            if thread_required and meta.get("thread_id") != thread_required:
+                                continue
+                        if sim > best_sim:
+                            best_sim = float(sim)
+                            best_id = mid
+                else:
+                    for mid, cvec, meta_json in candidates:
+                        if mid == entry.id:
                             continue
-                    sim = self._cosine_sim(vec, cvec)
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_id = mid
+                        if conv_required or thread_required:
+                            try:
+                                meta = json.loads(meta_json or "{}") if isinstance(meta_json, str) else {}
+                            except Exception:  # noqa: BLE001
+                                meta = {}
+                            if conv_required and meta.get("conversation_id") != conv_required:
+                                continue
+                            if thread_required and meta.get("thread_id") != thread_required:
+                                continue
+                        sim = self._cosine_sim(vec, cvec)
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_id = mid
 
                 if best_id is None or best_sim < min_sim:
                     if entry.id not in merged_by_id:
@@ -1949,34 +1982,49 @@ class TickRunner:
                                 timeout_s=30.0,
                             )
                         )[0]
-                        qnorm = math.sqrt(sum(v * v for v in qvec)) or 0.0
-                        if qnorm > 0:
-                            rows = await self._store.list_memory_summary_embeddings_for_vector_search(
-                                owner_pc_id=pc_id,
-                                include_public=include_public,
-                                direct_scope_id=direct_scope_id,
-                                model=vector_model,
-                                scan_limit=max(50, scan_limit),
-                            )
-                            scored: list[tuple[str, float]] = []
-                            for mid, vec in rows:
-                                if not vec or len(vec) != len(qvec):
-                                    continue
-                                dot = 0.0
-                                vnorm = 0.0
-                                for i, val in enumerate(vec):
-                                    dot += float(val) * float(qvec[i])
-                                    vnorm += float(val) * float(val)
-                                denom = qnorm * (math.sqrt(vnorm) or 0.0)
-                                if denom <= 0:
-                                    continue
-                                sim = dot / denom
+                        wanted_k = max(1, min(120, top_k))
+                        knn = await self._store.knn_memory_summary_similarities(
+                            owner_pc_id=pc_id,
+                            include_public=include_public,
+                            direct_scope_id=direct_scope_id,
+                            model=vector_model,
+                            query_vector=qvec,
+                            k=wanted_k,
+                        )
+                        if knn is not None:
+                            for mid, sim in knn:
                                 if sim >= min_sim:
-                                    scored.append((mid, sim))
-                            scored.sort(key=lambda x: x[1], reverse=True)
-                            for mid, sim in scored[: max(1, min(120, top_k))]:
-                                vector_sims[mid] = float(sim)
+                                    vector_sims[mid] = float(sim)
                             vector_used = True
+                        else:
+                            qnorm = math.sqrt(sum(v * v for v in qvec)) or 0.0
+                            if qnorm > 0:
+                                rows = await self._store.list_memory_summary_embeddings_for_vector_search(
+                                    owner_pc_id=pc_id,
+                                    include_public=include_public,
+                                    direct_scope_id=direct_scope_id,
+                                    model=vector_model,
+                                    scan_limit=max(50, scan_limit),
+                                )
+                                scored: list[tuple[str, float]] = []
+                                for mid, vec in rows:
+                                    if not vec or len(vec) != len(qvec):
+                                        continue
+                                    dot = 0.0
+                                    vnorm = 0.0
+                                    for i, val in enumerate(vec):
+                                        dot += float(val) * float(qvec[i])
+                                        vnorm += float(val) * float(val)
+                                    denom = qnorm * (math.sqrt(vnorm) or 0.0)
+                                    if denom <= 0:
+                                        continue
+                                    sim = dot / denom
+                                    if sim >= min_sim:
+                                        scored.append((mid, sim))
+                                scored.sort(key=lambda x: x[1], reverse=True)
+                                for mid, sim in scored[:wanted_k]:
+                                    vector_sims[mid] = float(sim)
+                                vector_used = True
                     except Exception as exc:  # noqa: BLE001
                         vector_error = f"{type(exc).__name__}: {exc}"
 
