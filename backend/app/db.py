@@ -10,6 +10,7 @@ from collections.abc import Iterable
 import aiosqlite
 
 from .models import Conversation, Event, ForumThread, MemoryEntry, Message, PcActivity, TickRecord
+from .text_utils import clean_keywords
 
 
 def _pack_embedding_f32(values: list[float]) -> bytes | None:
@@ -1756,19 +1757,7 @@ class SqliteStore:
         include_deleted: bool = False,
         limit: int = 200,
     ) -> list[MemoryEntry]:
-        cleaned_keywords: list[str] = []
-        seen_keywords: set[str] = set()
-        for keyword in keywords:
-            if not isinstance(keyword, str):
-                continue
-            text = keyword.strip()
-            if not text:
-                continue
-            dedupe_key = text.casefold()
-            if dedupe_key in seen_keywords:
-                continue
-            seen_keywords.add(dedupe_key)
-            cleaned_keywords.append(text)
+        cleaned_keywords = clean_keywords(keywords)
 
         scope_clauses: list[str] = []
         scope_params: list[str] = []

@@ -1,0 +1,501 @@
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, TYPE_CHECKING
+from uuid import NAMESPACE_URL, uuid5
+
+from pc_config.prompts import render_prompt_messages
+
+from ..llm import openai_chat_completions_url, parse_llm_response
+from ..models import ForumThread, MemoryEntry, Message, utc_now_iso
+from .dedup import dedup_merge_memories_on_write
+from .embeddings import maybe_upsert_memory_summary_embeddings
+from .events import add_private_event_safely
+
+if TYPE_CHECKING:
+    from ..tick_runner import TickRunner
+
+
+_MEMORY_TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}")
+_MEMORY_STOPWORDS = {
+    "这个",
+    "那个",
+    "什么",
+    "为什么",
+    "怎么",
+    "我们",
+    "你们",
+    "他们",
+    "自己",
+    "已经",
+    "还是",
+    "如果",
+    "因为",
+    "所以",
+    "然后",
+    "但是",
+    "就是",
+    "一个",
+    "一些",
+    "这种",
+    "那种",
+    "这里",
+    "那里",
+    "当前",
+    "最近",
+    "论坛",
+    "帖子",
+    "thread",
+    "reply",
+    "selected",
+}
+_MEMORY_ALLOWED_KINDS = {"autobiography", "relationship", "recent_event", "secret"}
+
+
+def _trim_memory_text(text: str, *, max_len: int) -> str:
+    cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(cleaned) > max_len:
+        return cleaned[:max_len] + "…"
+    return cleaned
+
+
+def _extract_memory_keywords(runner: "TickRunner", *parts: str) -> list[str]:
+    limit = max(1, int(runner._settings.memory_recall_max_keywords))  # noqa: SLF001
+    keywords: list[str] = []
+    seen: set[str] = set()
+
+    def add_keyword(value: str | None) -> None:
+        if not isinstance(value, str):
+            return
+        text = value.strip()
+        if not text:
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        keywords.append(text)
+
+    combined = "\n".join(part for part in parts if isinstance(part, str) and part.strip())
+    for pc in runner._engine.pcs:  # noqa: SLF001
+        if pc.name and pc.name in combined:
+            add_keyword(pc.name)
+
+    weights: dict[str, int] = {}
+    for match in _MEMORY_TOKEN_PATTERN.findall(combined):
+        token = match.strip()
+        if not token:
+            continue
+        norm = token.casefold()
+        if norm in _MEMORY_STOPWORDS or norm.isdigit() or len(token) <= 1:
+            continue
+        weights[token] = weights.get(token, 0) + 1
+
+    for token, _ in sorted(weights.items(), key=lambda item: (-item[1], -len(item[0]), item[0])):
+        add_keyword(token)
+        if len(keywords) >= limit:
+            break
+
+    return keywords[:limit]
+
+
+def _select_memory_writer_model(*, runner: "TickRunner", actor_pc_id: str | None) -> str | None:
+    if isinstance(runner._settings.openai_memory_model, str) and runner._settings.openai_memory_model.strip():  # noqa: SLF001
+        return runner._settings.openai_memory_model  # noqa: SLF001
+    if actor_pc_id:
+        model = getattr(next((p for p in runner._engine.pcs if p.id == actor_pc_id), None), "model", None)  # noqa: SLF001
+        if isinstance(model, str) and model.strip():
+            return model
+    if isinstance(runner._settings.openai_dm_model, str) and runner._settings.openai_dm_model.strip() and not actor_pc_id:  # noqa: SLF001
+        return runner._settings.openai_dm_model  # noqa: SLF001
+    if isinstance(runner._settings.openai_model, str) and runner._settings.openai_model.strip():  # noqa: SLF001
+        return runner._settings.openai_model  # noqa: SLF001
+    return None
+
+
+def _memory_scope_for_message(
+    *, runner: "TickRunner", message: Message, actor_pc_id: str | None, kind: str
+) -> tuple[str, str | None, str | None] | None:
+    if kind in {"autobiography", "relationship", "secret"}:
+        if not actor_pc_id:
+            return None
+        return "pc", None, actor_pc_id
+
+    if message.channel == "broadcast":
+        return "public", None, None
+    if message.channel == "direct":
+        if message.from_actor.kind == "pc" and isinstance(message.from_actor.id, str) and message.from_actor.id.strip():
+            from_pc_id = message.from_actor.id.strip()
+            target_pc = next((actor.id for actor in (message.to or []) if actor.kind == "pc" and actor.id), None)
+            if isinstance(target_pc, str) and target_pc.strip():
+                return "direct", runner._direct_memory_scope_id(pc_id=from_pc_id, peer_kind="pc", peer_id=target_pc.strip()), None  # noqa: SLF001
+            if any(actor.kind == "dm" for actor in (message.to or [])):
+                return "direct", runner._direct_memory_scope_id(pc_id=from_pc_id, peer_kind="dm", peer_id="dm"), None  # noqa: SLF001
+
+        if message.from_actor.kind == "dm":
+            target_pc = next((actor.id for actor in (message.to or []) if actor.kind == "pc" and actor.id), None)
+            if isinstance(target_pc, str) and target_pc.strip():
+                return "direct", runner._direct_memory_scope_id(pc_id=target_pc.strip(), peer_kind="dm", peer_id="dm"), None  # noqa: SLF001
+
+        return "direct", message.conversation_id, None
+    return None
+
+
+def _normalize_memory_upsert(
+    *,
+    runner: "TickRunner",
+    item: Any,
+    message: Message,
+    action_type: str,
+    actor_pc_id: str | None,
+    actor_name: str,
+    thread: ForumThread | None,
+) -> MemoryEntry | None:
+    if not isinstance(item, dict):
+        return None
+
+    raw_kind = runner._clean_str(item.get("kind"))  # noqa: SLF001
+    if raw_kind not in _MEMORY_ALLOWED_KINDS:
+        return None
+
+    scope_data = _memory_scope_for_message(runner=runner, message=message, actor_pc_id=actor_pc_id, kind=raw_kind)
+    if scope_data is None:
+        return None
+    scope, scope_id, owner_pc_id = scope_data
+
+    summary = _trim_memory_text(
+        str(item.get("summary") or ""),
+        max_len=max(1, int(runner._settings.memory_write_summary_chars)),  # noqa: SLF001
+    )
+    content = _trim_memory_text(
+        str(item.get("content") or ""),
+        max_len=max(1, int(runner._settings.memory_write_content_chars)),  # noqa: SLF001
+    )
+    if not summary or not content:
+        return None
+
+    importance_raw = item.get("importance")
+    importance = int(importance_raw) if isinstance(importance_raw, (int, float)) else 0
+    importance = max(0, min(10, importance))
+
+    subject_type = runner._clean_str(item.get("subject_type"))  # noqa: SLF001
+    subject_id = runner._clean_str(item.get("subject_id"))  # noqa: SLF001
+    merge_key = runner._clean_str(item.get("merge_key"))  # noqa: SLF001
+    source_type = runner._clean_str(item.get("source_type")) or "llm_write"  # noqa: SLF001
+
+    source_ref_id = message.send_batch_id or message.id
+    thread_title = thread.title if isinstance(thread, ForumThread) else None
+    source_excerpt = _trim_memory_text(
+        message.content,
+        max_len=max(1, int(runner._settings.memory_write_source_excerpt_chars)),  # noqa: SLF001
+    )
+    keywords_raw = item.get("keywords")
+    keywords: list[str] = []
+    if isinstance(keywords_raw, list):
+        for value in keywords_raw:
+            if isinstance(value, str) and value.strip():
+                keywords.append(value.strip())
+    if not keywords:
+        keywords = _extract_memory_keywords(runner, summary, content, thread_title or "", source_excerpt)
+    if not merge_key and raw_kind in {"autobiography", "relationship", "secret"}:
+        merge_parts = [raw_kind]
+        if subject_type:
+            merge_parts.append(subject_type)
+        if subject_id:
+            merge_parts.append(subject_id)
+        merge_parts.extend(keywords[:3] if keywords else [summary])
+        merge_key = "_".join(part.strip().casefold().replace(" ", "_") for part in merge_parts if part and part.strip())
+        merge_key = merge_key[:120] if merge_key else None
+
+    meta = {
+        "ref_type": "message",
+        "ref_id": source_ref_id,
+        "message_id": message.id,
+        "conversation_id": message.conversation_id,
+        "send_batch_id": message.send_batch_id,
+        "thread_id": message.thread_id,
+        "channel": message.channel,
+        "channel_id": message.conversation_id if message.channel == "broadcast" else None,
+        "thread_title": thread_title,
+        "action_type": action_type,
+        "actor_name": actor_name,
+        "merge_key": merge_key,
+        "keywords": keywords,
+        "source_excerpt": source_excerpt,
+    }
+    stable_ref = merge_key or source_ref_id
+    stable_key = "|".join(
+        [
+            scope,
+            scope_id or "",
+            owner_pc_id or "",
+            raw_kind,
+            subject_type or "",
+            subject_id or "",
+            stable_ref,
+            "" if merge_key else summary.casefold(),
+        ]
+    )
+    return MemoryEntry(
+        id=str(uuid5(NAMESPACE_URL, stable_key)),
+        scope=scope,
+        scope_id=scope_id,
+        owner_pc_id=owner_pc_id,
+        kind=raw_kind,
+        content=content,
+        summary=summary,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        importance=importance,
+        score=importance,
+        source_type=source_type,
+        meta=meta,
+    )
+
+
+def _deterministic_memory_write_upserts(*, runner: "TickRunner", message: Message, actor_name: str, thread: ForumThread | None) -> list[dict[str, Any]]:
+    excerpt = _trim_memory_text(
+        message.content,
+        max_len=max(1, int(runner._settings.memory_write_content_chars)),  # noqa: SLF001
+    )
+    if not excerpt:
+        return []
+
+    thread_title = thread.title if isinstance(thread, ForumThread) else None
+    if message.channel == "broadcast":
+        if thread_title:
+            summary = f"《{thread_title}》新增发言"
+            content = f"{actor_name}在《{thread_title}》提到：{excerpt}"
+        else:
+            summary = f"{actor_name}发布共享信息"
+            content = f"{actor_name}说：{excerpt}"
+        keywords = _extract_memory_keywords(runner, thread_title or "", actor_name, excerpt)
+        return [
+            {
+                "kind": "recent_event",
+                "summary": summary,
+                "content": content,
+                "importance": 1,
+                "source_type": "deterministic_write",
+                "keywords": keywords,
+            }
+        ]
+
+    target_pc = next((actor for actor in (message.to or []) if actor.kind == "pc" and actor.id), None)
+    target_name = (target_pc.name if target_pc and target_pc.name else None) or "对方"
+    keywords = _extract_memory_keywords(runner, actor_name, target_name, excerpt)
+    entry: dict[str, Any] = {
+        "kind": "recent_event",
+        "summary": f"{actor_name}与{target_name}有新的私聊",
+        "content": f"{actor_name}对{target_name}说：{excerpt}",
+        "importance": 1,
+        "source_type": "deterministic_write",
+        "keywords": keywords,
+    }
+    if target_pc and target_pc.id:
+        entry["subject_type"] = "pc"
+        entry["subject_id"] = target_pc.id
+    return [entry]
+
+
+def _pack_existing_memory_for_write(memory: MemoryEntry) -> dict[str, Any]:
+    merge_key = None
+    if isinstance(memory.meta, dict):
+        raw_merge_key = memory.meta.get("merge_key")
+        if isinstance(raw_merge_key, str) and raw_merge_key.strip():
+            merge_key = raw_merge_key.strip()
+    return {
+        "id": memory.id,
+        "scope": memory.scope,
+        "kind": memory.kind,
+        "summary": memory.summary,
+        "content": memory.content,
+        "subject_type": memory.subject_type,
+        "subject_id": memory.subject_id,
+        "score": memory.score,
+        "edit_state": memory.edit_state,
+        "deleted_at": memory.deleted_at,
+        "merge_key": merge_key,
+    }
+
+
+async def _list_existing_memories_for_write(
+    *,
+    runner: "TickRunner",
+    actor_pc_id: str | None,
+    actor_name: str,
+    message: Message,
+    thread: ForumThread | None,
+) -> list[dict[str, Any]]:
+    thread_title = thread.title if isinstance(thread, ForumThread) else ""
+    keywords = _extract_memory_keywords(runner, actor_name, thread_title, message.content)
+    include_public = message.channel == "broadcast"
+    direct_scope_id: str | None = None
+    if message.channel == "direct":
+        scope_data = _memory_scope_for_message(runner=runner, message=message, actor_pc_id=actor_pc_id, kind="recent_event")
+        if scope_data is not None:
+            _, direct_scope_id, _ = scope_data
+
+    memories = await runner._store.search_memories(  # noqa: SLF001
+        keywords=keywords,
+        owner_pc_id=actor_pc_id,
+        include_public=include_public,
+        direct_scope_id=direct_scope_id,
+        limit=max(1, int(runner._settings.memory_write_existing_max_items)),  # noqa: SLF001
+    )
+    if not memories and actor_pc_id:
+        memories = await runner._store.list_memories(  # noqa: SLF001
+            scope="pc",
+            owner_pc_id=actor_pc_id,
+            limit=max(1, int(runner._settings.memory_write_existing_max_items)),  # noqa: SLF001
+        )
+    max_items = max(1, int(runner._settings.memory_write_existing_max_items))  # noqa: SLF001
+    return [_pack_existing_memory_for_write(memory) for memory in memories[:max_items]]
+
+
+async def _llm_memory_write_upserts(
+    *,
+    runner: "TickRunner",
+    actor_pc_id: str | None,
+    actor_name: str,
+    action_type: str,
+    message: Message,
+    thread: ForumThread | None,
+) -> list[dict[str, Any]]:
+    if runner._settings.demo_fake or runner._llm is None:  # noqa: SLF001
+        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread)
+    if not (runner._settings.openai_base_url and runner._settings.openai_api_key):  # noqa: SLF001
+        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread)
+
+    model = _select_memory_writer_model(runner=runner, actor_pc_id=actor_pc_id)
+    if not model:
+        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread)
+
+    if message.channel == "broadcast":
+        scope_hint = "public + pc"
+    else:
+        scope_hint = "direct + pc"
+
+    thread_payload: dict[str, Any] | None = None
+    if isinstance(thread, ForumThread):
+        thread_payload = {"id": thread.id, "channel_id": thread.channel_id, "title": thread.title}
+    existing_memories = await _list_existing_memories_for_write(
+        runner=runner,
+        actor_pc_id=actor_pc_id,
+        actor_name=actor_name,
+        message=message,
+        thread=thread,
+    )
+
+    messages = render_prompt_messages(
+        "tick_runner.memory_write",
+        {
+            "max_items": str(max(1, int(runner._settings.memory_write_max_items))),  # noqa: SLF001
+            "summary_max_chars": str(max(1, int(runner._settings.memory_write_summary_chars))),  # noqa: SLF001
+            "content_max_chars": str(max(1, int(runner._settings.memory_write_content_chars))),  # noqa: SLF001
+            "pcs_personas": runner._format_pcs_personas_for_prompt(),  # noqa: SLF001
+            "action_type": action_type,
+            "scope_hint": scope_hint,
+            "actor_name": actor_name,
+            "message_json": json.dumps(message.model_dump(), ensure_ascii=False),
+            "thread_json": json.dumps(thread_payload, ensure_ascii=False),
+            "existing_memories_json": json.dumps(existing_memories, ensure_ascii=False),
+        },
+    )
+    url = openai_chat_completions_url(runner._settings.openai_base_url)  # noqa: SLF001
+    res = await runner._llm.chat(  # noqa: SLF001
+        url=url,
+        apikey=runner._settings.openai_api_key,  # noqa: SLF001
+        model=model,
+        messages=messages,
+        tools=None,
+    )
+
+    parsed = res.get("parsed") if isinstance(res, dict) else None
+    structured: Any | None = None
+    if isinstance(parsed, dict) and parsed.get("kind") == "structured":
+        structured = parsed.get("structured")
+    elif isinstance(parsed, dict) and parsed.get("kind") == "markdown":
+        markdown = parsed.get("markdown")
+        if isinstance(markdown, str):
+            structured = runner._try_parse_json_loose(markdown)  # noqa: SLF001
+
+    if structured is None:
+        raw = res.get("raw") if isinstance(res, dict) else None
+        parsed_raw = parse_llm_response(raw)
+        if parsed_raw["kind"] == "structured":
+            structured = parsed_raw.get("structured")
+        elif parsed_raw["kind"] == "markdown" and isinstance(parsed_raw.get("markdown"), str):
+            structured = runner._try_parse_json_loose(parsed_raw["markdown"])  # noqa: SLF001
+
+    if not isinstance(structured, dict):
+        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread)
+
+    upserts = structured.get("upserts")
+    if not isinstance(upserts, list):
+        return []
+    return [item for item in upserts if isinstance(item, dict)][: max(1, int(runner._settings.memory_write_max_items))]  # noqa: SLF001
+
+
+async def write_memories_for_message(
+    runner: "TickRunner",
+    *,
+    action_type: str,
+    actor_pc_id: str | None,
+    actor_name: str,
+    message: Message,
+    thread: ForumThread | None = None,
+) -> None:
+    try:
+        raw_upserts = await _llm_memory_write_upserts(
+            runner=runner,
+            actor_pc_id=actor_pc_id,
+            actor_name=actor_name,
+            action_type=action_type,
+            message=message,
+            thread=thread,
+        )
+        entries: list[MemoryEntry] = []
+        for item in raw_upserts[: max(1, int(runner._settings.memory_write_max_items))]:  # noqa: SLF001
+            entry = _normalize_memory_upsert(
+                runner=runner,
+                item=item,
+                message=message,
+                action_type=action_type,
+                actor_pc_id=actor_pc_id,
+                actor_name=actor_name,
+                thread=thread,
+            )
+            if entry is not None:
+                entries.append(entry)
+        if entries:
+            entries, precomputed = await dedup_merge_memories_on_write(runner=runner, entries=entries)
+            await runner._store.upsert_memories(entries)  # noqa: SLF001
+            if precomputed:
+                try:
+                    await runner._store.upsert_memory_summary_embeddings(  # noqa: SLF001
+                        model=(getattr(runner._settings, "openai_embedding_model", None) or "").strip(),  # noqa: SLF001
+                        items=precomputed,
+                        updated_at=utc_now_iso(),
+                    )
+                except Exception:
+                    pass
+            await maybe_upsert_memory_summary_embeddings(runner=runner, memories=entries)
+    except Exception as exc:
+        await add_private_event_safely(
+            runner=runner,
+            pc_id=actor_pc_id,
+            type="memory_write_error",
+            summary=f"memory write failed for {action_type}: {type(exc).__name__}",
+            consequences={
+                "action_type": action_type,
+                "actor_pc_id": actor_pc_id,
+                "actor_name": actor_name,
+                "message_id": message.id,
+                "conversation_id": message.conversation_id,
+                "thread_id": message.thread_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return
