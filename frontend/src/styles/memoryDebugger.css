@@ -73,6 +73,11 @@
   grid-template-rows: auto auto 1fr;
 }
 
+.memorySourcesPane,
+.memoryClustersPane {
+  grid-template-rows: auto 1fr;
+}
+
 .memoryDetailPane,
 .memoryEditorPane {
   border-left: 1px solid var(--border);
@@ -96,6 +101,12 @@
 .memoryDetailCard,
 .memoryEditorForm {
   padding: 12px 14px;
+}
+
+.memoryPaneScroll {
+  padding: 12px 14px;
+  overflow: auto;
+  min-height: 0;
 }
 
 .memoryFilters,
@@ -388,6 +399,295 @@
 .memoryError {
   border-top: 1px solid var(--border);
   color: #ff9f9f;
+}
+
+.memoryPaneMeta {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.memoryPaneActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.memoryModal .iconBtn.on {
+  background: color-mix(in srgb, var(--accent) 14%, rgba(255, 255, 255, 0.04));
+  border: 1px solid color-mix(in srgb, var(--accent) 44%, var(--border));
+}
+
+.memoryBentoColumn {
+  display: grid;
+  gap: 10px;
+}
+
+.memoryBentoDivider {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
+.memoryBentoPcGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.memoryBentoSelect {
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.memoryBentoSelect.active {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.memoryBentoSelectTitle {
+  font-size: 13px;
+  font-weight: 900;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memoryBentoSelectSub {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.memoryKindStack {
+  display: grid;
+  gap: 18px;
+}
+
+.memoryKindHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.memoryKindMeta {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.memoryBentoGrid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+}
+
+.memoryBentoCard {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memoryBentoCard.deleted {
+  opacity: 0.72;
+}
+
+.memoryBentoTop {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.memoryBentoSummaryRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.memoryBentoSummary {
+  font-size: 13px;
+  font-weight: 900;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memoryBentoBadge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 900;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.memoryBentoActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.memoryBentoActionIcon {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border-radius: 10px;
+}
+
+.memoryBentoActionIcon.on {
+  color: var(--accent);
+}
+
+.memoryBentoActionIcon.danger {
+  color: #ff9f9f;
+}
+
+.memoryBentoContent {
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.92;
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.memoryBentoTextarea {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: var(--text);
+  resize: none;
+  display: block;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 10px;
+  outline: none;
+  overflow: auto;
+}
+
+.memoryBentoTextarea:focus {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, var(--border));
+}
+
+.memoryBentoSummaryTextarea {
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.memoryBentoSummaryRow .memoryBentoTextarea {
+  flex: 1;
+  min-width: 0;
+}
+
+.memoryBentoFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.memoryBentoMeta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memoryBentoDetails {
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  padding-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.memoryBentoDetailGrid {
+  display: grid;
+  gap: 8px;
+}
+
+.memoryBentoDetailRow {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  font-size: 11px;
+}
+
+.memoryBentoDetailLabel {
+  color: var(--muted);
+  font-weight: 900;
+}
+
+.memoryBentoDetailValue {
+  color: var(--text);
+  word-break: break-word;
+}
+
+.memoryBentoDetailMuted {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.memoryBentoDetailActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.memoryBentoMetaJson {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre;
+}
+
+@media (max-width: 1100px) {
+  .memoryBentoPcGrid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+
+  .memoryBentoDetailRow {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 1100px) {

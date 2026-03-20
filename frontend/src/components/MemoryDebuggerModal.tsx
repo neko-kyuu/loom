@@ -1,35 +1,25 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pin, Plus, RefreshCcw, Save, ShieldAlert, UserSquare2, X, Edit, Trash2, Eraser, GitMerge, ChevronDown, ChevronUp } from "lucide-react";
-import type { EventLogItem, MemoryEntry } from "../types";
-import { createMemory, deleteMemory, getEvents, getMemories, patchMemory } from "../lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Edit, Info, Pin, RefreshCcw, Save, Trash2, X } from "lucide-react";
+import type { MemoryEntry } from "../types";
+import { deleteMemory, getMemories, patchMemory } from "../lib/api";
 import { formatTime } from "../lib/chatUi";
 
 type PcOption = { id: string; name: string };
-type ManualKind = "autobiography" | "secret";
 type MemoryKind = MemoryEntry["kind"];
-type MemoryEditState = MemoryEntry["edit_state"];
-type PanelMode = "view" | "edit" | "create" | "empty";
 
-type Draft = {
-  id: string | null;
-  scope: MemoryEntry["scope"];
-  scope_id: string;
-  owner_pc_id: string;
+type SourceSelection =
+  | { scope: "public" }
+  | { scope: "direct" }
+  | { scope: "pc"; pcId: string };
+
+type MemoryCluster = {
+  key: string;
   kind: MemoryKind;
-  summary: string;
-  content: string;
-  importance: number;
-  pinned: boolean;
-  subject_type: string;
-  subject_id: string;
-  edit_state: MemoryEditState;
-  deleted_at: string | null;
-  revision: number;
+  representative: MemoryEntry;
+  members: MemoryEntry[];
 };
 
 const ALL_KINDS: MemoryKind[] = ["autobiography", "secret", "relationship", "recent_event"];
-const CREATE_KINDS: ManualKind[] = ["autobiography", "secret"];
-const EDIT_STATE_OPTIONS: MemoryEditState[] = ["normal", "user_edited", "user_locked"];
 const KIND_LABELS: Record<MemoryKind, string> = {
   autobiography: "自传",
   secret: "秘密",
@@ -41,18 +31,6 @@ const SCOPE_LABELS: Record<MemoryEntry["scope"], string> = {
   public: "公共",
   direct: "私聊",
 };
-const EDIT_STATE_LABELS: Record<MemoryEditState, string> = {
-  normal: "正常",
-  user_edited: "人工修改",
-  user_locked: "人工锁定",
-  deleted: "已删除",
-};
-const SOURCE_TYPE_LABELS: Record<string, string> = {
-  manual: "手工",
-  llm_write: "模型写入",
-  deterministic_write: "规则写入",
-  migrated: "迁移导入",
-};
 
 function kindLabel(kind: MemoryKind): string {
   return KIND_LABELS[kind] || kind;
@@ -62,80 +40,80 @@ function scopeLabel(scope: MemoryEntry["scope"]): string {
   return SCOPE_LABELS[scope] || scope;
 }
 
-function editStateLabel(state: MemoryEditState): string {
-  return EDIT_STATE_LABELS[state] || state;
-}
-
-function sourceTypeLabel(sourceType: string | null | undefined): string {
-  if (!sourceType) return "—";
-  return SOURCE_TYPE_LABELS[sourceType] || sourceType;
-}
-
-function makeEmptyDraft(pcs: PcOption[], kind: ManualKind = "autobiography"): Draft {
-  return {
-    id: null,
-    scope: "pc",
-    scope_id: "",
-    owner_pc_id: pcs[0]?.id || "",
-    kind,
-    summary: "",
-    content: "",
-    importance: 1,
-    pinned: false,
-    subject_type: "",
-    subject_id: "",
-    edit_state: "normal",
-    deleted_at: null,
-    revision: 0,
-  };
-}
-
-function copyMemoryToDraft(memory: MemoryEntry, pcs: PcOption[]): Draft {
-  return {
-    id: memory.id,
-    scope: memory.scope,
-    scope_id: memory.scope_id || "",
-    owner_pc_id: memory.owner_pc_id || pcs[0]?.id || "",
-    kind: memory.kind,
-    summary: memory.summary,
-    content: memory.content,
-    importance: memory.importance,
-    pinned: memory.pinned,
-    subject_type: memory.subject_type || "",
-    subject_id: memory.subject_id || "",
-    edit_state: memory.edit_state,
-    deleted_at: memory.deleted_at || null,
-    revision: memory.revision,
-  };
-}
-
 function findPcName(pcs: PcOption[], pcId: string | null | undefined): string {
   if (!pcId) return "—";
   return pcs.find((pc) => pc.id === pcId)?.name || pcId;
 }
 
-function mergeKeyOf(memory: MemoryEntry | null): string {
+function mergeKeyOf(memory: MemoryEntry): string {
   const value = memory?.meta?.merge_key;
-  return typeof value === "string" && value.trim() ? value.trim() : "—";
+  return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-function mergedSourcesCountOf(memory: MemoryEntry | null): number {
+function mergedSourcesCountOf(memory: MemoryEntry): number {
   const merged = memory?.meta?.merged_sources;
   return Array.isArray(merged) ? merged.length : 0;
 }
 
-function dedupLastAtOf(memory: MemoryEntry | null): string | null {
-  const value = memory?.meta?.dedup_last_at;
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function dedupLastSimOf(memory: MemoryEntry | null): number | null {
-  const value = memory?.meta?.dedup_last_sim;
-  return typeof value === "number" ? value : null;
-}
-
 function formatNullableTime(value: string | null | undefined): string {
   return value ? formatTime(value) : "—";
+}
+
+function compareTimestampDesc(a: string | null | undefined, b: string | null | undefined): number {
+  return String(b || "").localeCompare(String(a || ""));
+}
+
+function clusterItems(items: MemoryEntry[]): Record<MemoryKind, MemoryCluster[]> {
+  const mapByKind: Record<MemoryKind, Map<string, MemoryEntry[]>> = {
+    autobiography: new Map(),
+    secret: new Map(),
+    relationship: new Map(),
+    recent_event: new Map(),
+  };
+
+  for (const item of items) {
+    const baseKey = mergeKeyOf(item) || item.id;
+    const key = `${item.scope}:${item.owner_pc_id || ""}:${item.scope_id || ""}:${baseKey}`;
+    const bucket = mapByKind[item.kind];
+    const existing = bucket.get(key);
+    if (existing) existing.push(item);
+    else bucket.set(key, [item]);
+  }
+
+  const result: Record<MemoryKind, MemoryCluster[]> = {
+    autobiography: [],
+    secret: [],
+    relationship: [],
+    recent_event: [],
+  };
+
+  for (const kind of ALL_KINDS) {
+    const clusters: MemoryCluster[] = [];
+    for (const [key, members] of mapByKind[kind].entries()) {
+      const sortedMembers = [...members].sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        if (a.score !== b.score) return b.score - a.score;
+        return compareTimestampDesc(a.updated_at, b.updated_at);
+      });
+      clusters.push({
+        key,
+        kind,
+        representative: sortedMembers[0],
+        members: sortedMembers,
+      });
+    }
+
+    clusters.sort((a, b) => {
+      const ra = a.representative;
+      const rb = b.representative;
+      if (ra.pinned !== rb.pinned) return ra.pinned ? -1 : 1;
+      if (ra.score !== rb.score) return rb.score - ra.score;
+      return compareTimestampDesc(ra.updated_at, rb.updated_at);
+    });
+    result[kind] = clusters;
+  }
+
+  return result;
 }
 
 export default function MemoryDebuggerModal(props: {
@@ -143,34 +121,22 @@ export default function MemoryDebuggerModal(props: {
   onClose: () => void;
   pcs: PcOption[];
 }) {
+  const [selection, setSelection] = useState<SourceSelection>({ scope: "public" });
   const [items, setItems] = useState<MemoryEntry[]>([]);
   const [turnNo, setTurnNo] = useState<number | null>(null);
   const [decayInfo, setDecayInfo] = useState<{ interval_ticks: number; k: number; threshold: number } | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const [scopeFilter, setScopeFilter] = useState<string>("");
-  const [kindFilter, setKindFilter] = useState<string>("");
-  const [ownerPcFilter, setOwnerPcFilter] = useState<string>("");
+  const [detailsKey, setDetailsKey] = useState<string | null>(null);
   const [pinnedOnly, setPinnedOnly] = useState(false);
   const [showDeleted, setShowDeleted] = useState(false);
-  const [editStateFilter, setEditStateFilter] = useState<string>("");
-  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>("");
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<{ key: string; memoryId: string; summary: string; content: string; pinned: boolean } | null>(null);
+  const [editSizing, setEditSizing] = useState<{ key: string; summaryHeight: number; contentHeight: number } | null>(null);
 
-  const [draft, setDraft] = useState<Draft>(() => makeEmptyDraft(props.pcs));
-  const [panelMode, setPanelMode] = useState<PanelMode>("empty");
-
-  const selected = useMemo(() => items.find((item) => item.id === selectedId) || null, [items, selectedId]);
-  const isEditing = panelMode === "edit" || panelMode === "create";
-  const canSaveDraft = !draft.deleted_at;
-  const currentMetaMemory = panelMode === "create" ? null : selected;
-  const [showMergeEvents, setShowMergeEvents] = useState(false);
-  const [mergeEventsLoading, setMergeEventsLoading] = useState(false);
-  const [mergeEventsError, setMergeEventsError] = useState<string | null>(null);
-  const [mergeEvents, setMergeEvents] = useState<EventLogItem[]>([]);
+  const summaryRefByKey = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const contentRefByKey = useRef<Map<string, HTMLDivElement | null>>(new Map());
 
   const loadMemories = useCallback(async () => {
     if (!props.open) return;
@@ -178,61 +144,21 @@ export default function MemoryDebuggerModal(props: {
     setError(null);
     try {
       const res = await getMemories({
-        scope: scopeFilter || null,
-        kind: kindFilter || null,
-        ownerPcId: ownerPcFilter || null,
+        scope: selection.scope,
+        ownerPcId: selection.scope === "pc" ? selection.pcId : null,
         pinned: pinnedOnly ? true : null,
         deleted: showDeleted,
-        editState: editStateFilter || null,
-        sourceType: sourceTypeFilter || null,
         limit: 200,
       });
       setItems(res.items || []);
       setTurnNo(res.turn_no ?? null);
       setDecayInfo(res.decay ?? null);
-      setSelectedId((cur) => {
-        if (cur && (res.items || []).some((item) => item.id === cur)) {
-          return cur;
-        }
-        if (panelMode === "create" || panelMode === "empty") {
-          return null;
-        }
-        return res.items?.[0]?.id || null;
-      });
     } catch (e: any) {
       setError(String(e?.message || e));
     } finally {
       setLoading(false);
     }
-  }, [props.open, scopeFilter, kindFilter, ownerPcFilter, pinnedOnly, showDeleted, editStateFilter, sourceTypeFilter, panelMode]);
-
-  const dashText = useCallback((value: string | number | null | undefined) => {
-    if (value == null) return "-";
-    if (typeof value === "string") return value.trim() ? value : "-";
-    return String(value);
-  }, []);
-
-  const filtersActive = useMemo(() => {
-    return Boolean(
-      scopeFilter ||
-        kindFilter ||
-        ownerPcFilter ||
-        editStateFilter ||
-        sourceTypeFilter ||
-        pinnedOnly ||
-        showDeleted
-    );
-  }, [scopeFilter, kindFilter, ownerPcFilter, editStateFilter, sourceTypeFilter, pinnedOnly, showDeleted]);
-
-  const resetFilters = useCallback(() => {
-    setScopeFilter("");
-    setKindFilter("");
-    setOwnerPcFilter("");
-    setPinnedOnly(false);
-    setShowDeleted(false);
-    setEditStateFilter("");
-    setSourceTypeFilter("");
-  }, []);
+  }, [props.open, selection, pinnedOnly, showDeleted]);
 
   useEffect(() => {
     if (!props.open) return;
@@ -250,108 +176,83 @@ export default function MemoryDebuggerModal(props: {
 
   useEffect(() => {
     if (!props.open) return;
-    if (!props.pcs.length) return;
-    setDraft((prev) => {
-      if (prev.owner_pc_id) return prev;
-      return { ...prev, owner_pc_id: props.pcs[0].id };
-    });
-  }, [props.open, props.pcs]);
+    if (selection.scope !== "pc") return;
+    if (props.pcs.some((pc) => pc.id === selection.pcId)) return;
+    const fallback = props.pcs[0]?.id;
+    if (fallback) setSelection({ scope: "pc", pcId: fallback });
+    else setSelection({ scope: "public" });
+  }, [props.open, props.pcs, selection]);
 
-  useEffect(() => {
-    if (!props.open) return;
-    if (!selected || panelMode === "create") return;
-    setDraft(copyMemoryToDraft(selected, props.pcs));
-  }, [panelMode, props.open, props.pcs, selected]);
+  const clustersByKind = useMemo(() => clusterItems(items), [items]);
 
-  const loadMergeEvents = useCallback(async () => {
-    if (!props.open) return;
-    if (!selectedId) return;
-    setMergeEventsLoading(true);
-    setMergeEventsError(null);
-    try {
-      const res = await getEvents({ limit: 200 });
-      const filtered = (res.items || []).filter((it) => {
-        if (!it || it.type !== "memory_write_dedup_merge") return false;
-        const mergedInto = it.consequences?.merged_into_id;
-        return mergedInto === selectedId;
-      });
-      filtered.sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
-      setMergeEvents(filtered.slice(0, 12));
-    } catch (e: any) {
-      setMergeEventsError(String(e?.message || e));
-    } finally {
-      setMergeEventsLoading(false);
+  const selectedLabel = useMemo(() => {
+    if (selection.scope === "pc") {
+      return `PC · ${findPcName(props.pcs, selection.pcId)}`;
     }
-  }, [props.open, selectedId]);
+    return scopeLabel(selection.scope);
+  }, [props.pcs, selection]);
 
-  useEffect(() => {
-    if (!props.open) return;
-    if (!showMergeEvents) return;
-    void loadMergeEvents();
-  }, [props.open, showMergeEvents, selectedId, loadMergeEvents]);
+  const cancelEdit = useCallback(() => {
+    setEditingKey(null);
+    setEditDraft(null);
+    setEditSizing(null);
+  }, []);
 
-  const beginCreate = useCallback(
-    (kind: ManualKind = "autobiography") => {
-      setSelectedId(null);
-      setDraft(makeEmptyDraft(props.pcs, kind));
-      setPanelMode("create");
-    },
-    [props.pcs]
-  );
-
-  const resetDraft = useCallback(() => {
-    if (panelMode === "create") {
-      setDraft(makeEmptyDraft(props.pcs, draft.kind === "secret" ? "secret" : "autobiography"));
-      return;
-    }
-    if (selected && draft.id === selected.id) {
-      setDraft(copyMemoryToDraft(selected, props.pcs));
-      return;
-    }
-    setDraft((prev) => {
-      const empty = makeEmptyDraft(props.pcs, prev.kind === "secret" ? "secret" : "autobiography");
-      return {
-        ...empty,
-        owner_pc_id: prev.owner_pc_id || empty.owner_pc_id,
-      };
-    });
-  }, [draft.id, props.pcs, selected]);
-
-  const startEditingMemory = useCallback(
-    (memory: MemoryEntry) => {
-      setSelectedId(memory.id);
-      setDraft(copyMemoryToDraft(memory, props.pcs));
-      setPanelMode("edit");
-    },
-    [props.pcs]
-  );
-
-  const showMemoryDetails = useCallback(
-    (memoryId: string) => {
-      setSelectedId(memoryId);
-      setPanelMode("view");
+  const beginEdit = useCallback(
+    (key: string, memory: MemoryEntry) => {
+      const summaryHeight = summaryRefByKey.current.get(key)?.getBoundingClientRect().height || 0;
+      const contentHeight = contentRefByKey.current.get(key)?.getBoundingClientRect().height || 0;
+      setEditingKey(key);
+      setEditDraft({ key, memoryId: memory.id, summary: memory.summary, content: memory.content, pinned: memory.pinned });
+      setEditSizing({ key, summaryHeight, contentHeight });
     },
     []
   );
 
-  const togglePin = useCallback(
-    async (memory: MemoryEntry) => {
-      setSaving(true);
-      setError(null);
-      try {
-        const updated = await patchMemory(memory.id, { pinned: !memory.pinned });
-        setItems((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-        if (selectedId === updated.id) {
-          setDraft((prev) => ({ ...prev, pinned: updated.pinned }));
-        }
-      } catch (e: any) {
-        setError(String(e?.message || e));
-      } finally {
-        setSaving(false);
+  const saveEdit = useCallback(async () => {
+    if (!editDraft) return;
+    const summary = editDraft.summary.trim();
+    const content = editDraft.content.trim();
+    if (!summary || !content) {
+      setError("请填写摘要和正文");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await patchMemory(editDraft.memoryId, { summary, content, pinned: editDraft.pinned });
+      setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)));
+      cancelEdit();
+      await loadMemories();
+    } catch (e: any) {
+      setError(String(e?.message || e));
+    } finally {
+      setSaving(false);
+    }
+  }, [cancelEdit, editDraft, loadMemories]);
+
+  const togglePin = useCallback(async (key: string, memory: MemoryEntry) => {
+    const nextPinned = editDraft && editDraft.key === key ? !editDraft.pinned : !memory.pinned;
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await patchMemory(memory.id, { pinned: nextPinned });
+      setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)));
+      if (editDraft?.key === key && editDraft.memoryId === updated.id) {
+        setEditDraft((prev) => (prev ? { ...prev, pinned: updated.pinned } : prev));
       }
-    },
-    [selectedId]
-  );
+      if (pinnedOnly) {
+        if (editDraft?.key === key && editDraft.memoryId === updated.id && !updated.pinned) {
+          cancelEdit();
+        }
+        await loadMemories();
+      }
+    } catch (e: any) {
+      setError(String(e?.message || e));
+    } finally {
+      setSaving(false);
+    }
+  }, [cancelEdit, editDraft, loadMemories, pinnedOnly]);
 
   const removeMemory = useCallback(
     async (memory: MemoryEntry) => {
@@ -359,13 +260,10 @@ export default function MemoryDebuggerModal(props: {
       setSaving(true);
       setError(null);
       try {
-        const updated = await deleteMemory(memory.id);
-        setItems((prev) => prev.map((item) => (item.id === updated.id ? updated : item)).filter((item) => (showDeleted ? true : !item.deleted_at)));
-        if (selectedId === updated.id) {
-          setSelectedId(null);
-          setDraft(makeEmptyDraft(props.pcs));
-          setPanelMode("empty");
+        if (editDraft?.memoryId === memory.id) {
+          cancelEdit();
         }
+        await deleteMemory(memory.id);
         await loadMemories();
       } catch (e: any) {
         setError(String(e?.message || e));
@@ -373,59 +271,8 @@ export default function MemoryDebuggerModal(props: {
         setSaving(false);
       }
     },
-    [loadMemories, props.pcs, selectedId, showDeleted]
+    [cancelEdit, editDraft, loadMemories]
   );
-
-  const saveDraft = useCallback(async () => {
-    if (!draft.summary.trim() || !draft.content.trim()) {
-      setError("请填写摘要和正文");
-      return;
-    }
-    if (!draft.id && !draft.owner_pc_id.trim()) {
-      setError("新建时必须选择 PC");
-      return;
-    }
-    if (draft.scope === "pc" && !draft.owner_pc_id.trim()) {
-      setError("pc scope 记忆必须有 owner_pc_id");
-      return;
-    }
-    if (!canSaveDraft) {
-      setError("已删除记忆暂不支持恢复，请仅浏览");
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      const next = draft.id
-        ? await patchMemory(draft.id, {
-            owner_pc_id: draft.scope === "pc" ? draft.owner_pc_id || null : null,
-            kind: draft.kind,
-            summary: draft.summary,
-            content: draft.content,
-            importance: draft.importance,
-            pinned: draft.pinned,
-            subject_type: draft.subject_type || null,
-            subject_id: draft.subject_id || null,
-            edit_state: draft.edit_state,
-          })
-        : await createMemory({
-            owner_pc_id: draft.owner_pc_id,
-            kind: draft.kind as ManualKind,
-            summary: draft.summary,
-            content: draft.content,
-            importance: draft.importance,
-            pinned: draft.pinned,
-          });
-      await loadMemories();
-      setSelectedId(next.id);
-      setDraft(copyMemoryToDraft(next, props.pcs));
-      setPanelMode("view");
-    } catch (e: any) {
-      setError(String(e?.message || e));
-    } finally {
-      setSaving(false);
-    }
-  }, [canSaveDraft, draft, loadMemories, props.pcs]);
 
   if (!props.open) return null;
 
@@ -443,8 +290,11 @@ export default function MemoryDebuggerModal(props: {
           <div>
             <div className="memoryTitle">记忆调试器</div>
             <div className="memorySubTitle">
-              {turnNo != null ? `turn #${turnNo}` : "turn 未知"}
+              {selectedLabel}
+              {turnNo != null ? ` · turn #${turnNo}` : ""}
               {decayInfo ? ` · decay ${decayInfo.interval_ticks} ticks / k=${decayInfo.k} / threshold=${decayInfo.threshold}` : ""}
+              {loading ? " · 加载中…" : ""}
+              {saving ? " · 保存中…" : ""}
             </div>
           </div>
           <div className="memoryHeaderActions">
@@ -458,489 +308,334 @@ export default function MemoryDebuggerModal(props: {
         </div>
 
         <div className="memoryBody">
-          <section className="memoryPane memoryListPane">
+          <section className="memoryPane memorySourcesPane">
             <div className="memoryPaneHead">
-              <div className="memoryPaneTitle">浏览</div>
-              <button className="smallBtn" onClick={() => beginCreate("autobiography")}>
-                <Plus size={14} />
-              </button>
+              <div className="memoryPaneTitle">来源</div>
+              <div className="memoryPaneMeta">public → direct → PC</div>
             </div>
-            <div className="memoryFilters">
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <button
-                  className="smallBtn"
-                  type="button"
-                  onClick={() => setFiltersOpen((v) => !v)}
-                  title={filtersOpen ? "收起筛选" : "展开筛选"}
-                  style={{ gap: "6px" }}
-                >
-                  {filtersOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                  <span>{filtersActive ? "筛选（已启用）" : "筛选"}</span>
-                </button>
-                {filtersActive ? (
-                  <button className="smallBtn" type="button" onClick={resetFilters} title="清空筛选">
-                    <Eraser size={14} />
-                  </button>
-                ) : null}
-              </div>
 
-              {filtersOpen ? (
-                <>
-                  <select className="customSelect" value={scopeFilter} onChange={(e) => setScopeFilter(e.target.value)}>
-                    <option value="">全部范围</option>
-                    <option value="pc">角色私有</option>
-                    <option value="public">公共</option>
-                    <option value="direct">私聊</option>
-                  </select>
-                  <select className="customSelect" value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}>
-                    <option value="">全部类型</option>
-                    {ALL_KINDS.map((kind) => (
-                      <option key={kind} value={kind}>{kindLabel(kind)}</option>
-                    ))}
-                  </select>
-                  <select className="customSelect" value={ownerPcFilter} onChange={(e) => setOwnerPcFilter(e.target.value)}>
-                    <option value="">全部 PC</option>
-                    {props.pcs.map((pc) => (
-                      <option key={pc.id} value={pc.id}>{pc.name}</option>
-                    ))}
-                  </select>
-                  <select className="customSelect" value={editStateFilter} onChange={(e) => setEditStateFilter(e.target.value)}>
-                    <option value="">全部编辑状态</option>
-                    <option value="normal">正常</option>
-                    <option value="user_edited">人工修改</option>
-                    <option value="user_locked">人工锁定</option>
-                    <option value="deleted">已删除</option>
-                  </select>
-                  <select className="customSelect" value={sourceTypeFilter} onChange={(e) => setSourceTypeFilter(e.target.value)}>
-                    <option value="">全部来源</option>
-                    <option value="manual">手工</option>
-                    <option value="llm_write">模型写入</option>
-                    <option value="deterministic_write">规则写入</option>
-                    <option value="migrated">迁移导入</option>
-                  </select>
-                  <label className="memoryCheck">
-                    <input type="checkbox" checked={pinnedOnly} onChange={(e) => setPinnedOnly(e.target.checked)} />
-                    <span>仅 pinned</span>
-                  </label>
-                  <label className="memoryCheck">
-                    <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
-                    <span>显示已删除</span>
-                  </label>
-                </>
-              ) : null}
-            </div>
-            <div className="memoryList">
-              {loading ? <div className="memoryEmpty">加载中…</div> : null}
-              {!loading && !items.length ? <div className="memoryEmpty">暂无记忆</div> : null}
-              {items.map((item) => (
-                <div
-                  key={item.id}
-                  className={`memoryRow ${selectedId === item.id ? "active" : ""} ${item.deleted_at ? "deleted" : ""}`}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => showMemoryDetails(item.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      showMemoryDetails(item.id);
-                    }
+            <div className="memoryPaneScroll">
+              <div className="memoryBentoColumn">
+                <button
+                  type="button"
+                  className={`memoryBentoSelect ${selection.scope === "public" ? "active" : ""}`}
+                  onClick={() => {
+                    setDetailsKey(null);
+                    cancelEdit();
+                    setSelection({ scope: "public" });
                   }}
                 >
-                    <div className="memoryRowTop">
-                    <span className={`memoryBadge kind-${item.kind}`}>{kindLabel(item.kind)}</span>
-                    {item.deleted_at ? <span className="memoryBadge state-deleted">已删除</span> : null}
-                    {mergedSourcesCountOf(item) > 0 ? (
-                      <span
-                        className="memoryBadge state-merged"
-                        title={`写入去重合并 ${mergedSourcesCountOf(item)} 次 · 最近 ${formatNullableTime(dedupLastAtOf(item) || undefined)} · sim=${dashText(dedupLastSimOf(item))}`}
-                        style={{ gap: "4px" }}
-                      >
-                        <GitMerge size={12} />
-                        <span>合并×{mergedSourcesCountOf(item)}</span>
-                      </span>
-                    ) : null}
+                  <div className="memoryBentoSelectTitle">公共</div>
+                  <div className="memoryBentoSelectSub">scope=public</div>
+                </button>
+
+                <button
+                  type="button"
+                  className={`memoryBentoSelect ${selection.scope === "direct" ? "active" : ""}`}
+                  onClick={() => {
+                    setDetailsKey(null);
+                    cancelEdit();
+                    setSelection({ scope: "direct" });
+                  }}
+                >
+                  <div className="memoryBentoSelectTitle">私聊</div>
+                  <div className="memoryBentoSelectSub">scope=direct</div>
+                </button>
+
+                <div className="memoryBentoDivider">PC</div>
+                <div className="memoryBentoPcGrid">
+                  {props.pcs.map((pc) => (
                     <button
-                      className={`memoryPinBtn ${item.pinned ? "on" : ""}`}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        void togglePin(item);
+                      key={pc.id}
+                      type="button"
+                      className={`memoryBentoSelect ${selection.scope === "pc" && selection.pcId === pc.id ? "active" : ""}`}
+                      onClick={() => {
+                        setDetailsKey(null);
+                        cancelEdit();
+                        setSelection({ scope: "pc", pcId: pc.id });
                       }}
-                      aria-label={item.pinned ? "取消 pin" : "pin 记忆"}
-                      title={item.pinned ? "取消 pin" : "pin"}
+                      title={pc.id}
                     >
-                      <Pin size={14} />
+                      <div className="memoryBentoSelectTitle">{pc.name}</div>
+                      <div className="memoryBentoSelectSub">pc</div>
                     </button>
-                  </div>
-                  <div className="memorySummary">{item.summary}</div>
-                  <div className="memoryMetaLine">
-                    <span>{scopeLabel(item.scope)}</span>
-                    {!item.deleted_at ? (
-                      <>
-                        <span style={{ marginRight: "auto" }}>·</span>
-                        <button
-                          className="memoryInlineAction"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            startEditingMemory(item);
-                          }}
-                        >
-                          <Edit size={14} />
-                        </button>
-                        <button
-                          style={{ marginRight: "10px" }}
-                          className="memoryInlineAction danger"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            void removeMemory(item);
-                          }}
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </>
-                    ) : null}
-                  </div>
+                  ))}
                 </div>
-              ))}
+              </div>
             </div>
           </section>
 
-          <section className="memoryPane memoryDetailPane memoryInspectorPane">
+          <section className="memoryPane memoryClustersPane">
             <div className="memoryPaneHead">
-              <div>
-                <div className="memoryPaneTitle">
-                  {panelMode === "create" ? "新建记忆" : panelMode === "edit" ? "编辑记忆" : "记忆详情"}
-                </div>
-                <div className="memorySubTitle">
-                  {panelMode === "create"
-                    ? "填写空白记忆"
-                    : panelMode === "edit"
-                      ? `正在修改：${scopeLabel(draft.scope)} / ${kindLabel(draft.kind)} · 修订号 ${draft.revision}`
-                      : selected
-                        ? `查看：${scopeLabel(selected.scope)} / ${kindLabel(selected.kind)}`
-                        : "从左侧选择一条记忆，或点击新建"}
-                </div>
-              </div>
-              <div className="memoryDetailActions">
-                {panelMode === "view" && selected && !selected.deleted_at ? (
-                  <>
-                    <button 
-                      className="smallBtn" 
-                      onClick={() => void togglePin(selected)}
-                      aria-label={selected.pinned ? "取消 pin" : "pin 记忆"}
-                      title={selected.pinned ? "取消 pin" : "pin"}
-                    >
-                      <Pin size={14} />
-                    </button>
-                    <button className="smallBtn" onClick={() => startEditingMemory(selected)}>
-                      <Edit size={14} />
-                    </button>
-                    <button className="smallBtn danger" onClick={() => void removeMemory(selected)}>
-                      <Trash2 size={14} />
-                    </button>
-                  </>
-                ) : null}
-                {(panelMode === "edit" || panelMode === "create") ? (
-                  <>
-                    <button className="smallBtn" onClick={resetDraft}>
-                      <Eraser size={14} />
-                    </button>
-                    <button className="smallBtn strong" disabled={saving || !canSaveDraft} onClick={() => void saveDraft()}>
-                      <Save size={14} />
-                    </button>
-                  </>
-                ) : null}
-                {panelMode === "view" ? (
-                  <>
-                    <button className="smallBtn" onClick={() => beginCreate("autobiography")}>
-                      <UserSquare2 size={14} />
-                      <span>新建自传</span>
-                    </button>
-                    <button className="smallBtn" onClick={() => beginCreate("secret")}>
-                      <ShieldAlert size={14} />
-                      <span>新建秘密</span>
-                    </button>
-                  </>
-                ) : null}
+              <div className="memoryPaneTitle">聚类记忆</div>
+              <div className="memoryPaneActions">
+                <button
+                  type="button"
+                  className={`iconBtn iconOnly ${pinnedOnly ? "on" : ""}`}
+                  onClick={() => setPinnedOnly((v) => !v)}
+                  aria-label={pinnedOnly ? "显示全部" : "仅 pinned"}
+                  title={pinnedOnly ? "显示全部" : "仅 pinned"}
+                >
+                  <Pin size={18} />
+                </button>
+                <button
+                  type="button"
+                  className={`iconBtn iconOnly ${showDeleted ? "on" : ""}`}
+                  onClick={() => setShowDeleted((v) => !v)}
+                  aria-label={showDeleted ? "隐藏已删除" : "显示已删除"}
+                  title={showDeleted ? "隐藏已删除" : "显示已删除"}
+                >
+                  <Trash2 size={18} />
+                </button>
               </div>
             </div>
-            {panelMode !== "empty" ? (
-              <div className="memoryDetailCard">
-                <div className="memoryDetailLayout">
-                  <div className="memoryDetailSide">
-                    <div className="memoryDetailGroup">
-                      <div className="memoryDetailGroupTitle">基础信息</div>
-                      <div className="formRow">
-                        <div className="formLabel">摘要</div>
-                        {isEditing ? (
-                          <input
-                            className="customSelect"
-                            value={draft.summary}
-                            disabled={!!draft.deleted_at}
-                            onChange={(e) => setDraft((prev) => ({ ...prev, summary: e.target.value }))}
-                            placeholder="短摘要，便于检索"
-                          />
-                        ) : (
-                          <div className="memoryStaticValue">{dashText(selected?.summary)}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">范围</div>
-                        {isEditing ? (
-                          <input className="customSelect" value={scopeLabel(draft.scope)} readOnly />
-                        ) : (
-                          <div className="memoryStaticValue">{selected ? scopeLabel(selected.scope) : "-"}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">类型</div>
-                        {isEditing ? (
-                          <select
-                            className="customSelect"
-                            value={draft.kind}
-                            disabled={!!draft.deleted_at}
-                            onChange={(e) => setDraft((prev) => ({ ...prev, kind: e.target.value as MemoryKind }))}
-                          >
-                            {(draft.id ? ALL_KINDS : CREATE_KINDS).map((kind) => (
-                              <option key={kind} value={kind}>{kindLabel(kind)}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="memoryStaticValue">{selected ? kindLabel(selected.kind) : "-"}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">归属角色</div>
-                        {isEditing ? (
-                          <select
-                            className="customSelect"
-                            value={draft.owner_pc_id}
-                            disabled={draft.scope !== "pc" || !!draft.deleted_at}
-                            onChange={(e) => setDraft((prev) => ({ ...prev, owner_pc_id: e.target.value }))}
-                          >
-                            {props.pcs.map((pc) => (
-                              <option key={pc.id} value={pc.id}>{pc.name}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="memoryStaticValue">{findPcName(props.pcs, selected?.owner_pc_id)}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">范围 ID</div>
-                        {isEditing ? (
-                          <input className="customSelect" value={draft.scope_id} readOnly placeholder="范围 ID 不可修改" />
-                        ) : (
-                          <div className="memoryStaticValue">{dashText(selected?.scope_id)}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">关联对象类型</div>
-                        {isEditing ? (
-                          <input
-                            className="customSelect"
-                            value={draft.subject_type}
-                            disabled={!!draft.deleted_at}
-                            onChange={(e) => setDraft((prev) => ({ ...prev, subject_type: e.target.value }))}
-                            placeholder="例如：pc / dm"
-                          />
-                        ) : (
-                          <div className="memoryStaticValue">{dashText(selected?.subject_type)}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">关联对象 ID</div>
-                        {isEditing ? (
-                          <input
-                            className="customSelect"
-                            value={draft.subject_id}
-                            disabled={!!draft.deleted_at}
-                            onChange={(e) => setDraft((prev) => ({ ...prev, subject_id: e.target.value }))}
-                            placeholder="关联对象 id"
-                          />
-                        ) : (
-                          <div className="memoryStaticValue">{dashText(selected?.subject_id)}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">置顶</div>
-                        <div className="memoryInlineFields">
-                          <label className="memoryCheck">
-                            <input
-                              type="checkbox"
-                              checked={isEditing ? draft.pinned : !!selected?.pinned}
-                              disabled={!isEditing || !!draft.deleted_at}
-                              onChange={(e) => setDraft((prev) => ({ ...prev, pinned: e.target.checked }))}
-                            />
-                            <span>置顶此记忆</span>
-                          </label>
-                        </div>
-                      </div>
-                    </div>
 
-                    <div className="memoryDetailGroup">
-                      <div className="memoryDetailGroupTitle">来源与分值</div>
-                      <div className="formRow">
-                        <div className="formLabel">来源</div>
-                        <div className="memoryStaticValue">{sourceTypeLabel(currentMetaMemory?.source_type)}</div>
+            <div className="memoryPaneScroll">
+              <div className="memoryKindStack">
+                {ALL_KINDS.map((kind) => {
+                  const clusters = clustersByKind[kind] || [];
+                  return (
+                    <div key={kind} className="memoryKindSection">
+                      <div className="memoryKindHeader">
+                        <span className={`memoryBadge kind-${kind}`}>{kindLabel(kind)}</span>
+                        <span className="memoryKindMeta">
+                          {clusters.length} 个盒子 · {clusters.reduce((sum, it) => sum + it.members.length, 0)} 条记忆
+                        </span>
                       </div>
-                      <div className="formRow">
-                        <div className="formLabel">合并次数</div>
-                        <div className="memoryStaticValue">{dashText(mergedSourcesCountOf(currentMetaMemory))}</div>
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">最近合并</div>
-                        <div className="memoryStaticValue">
-                          {formatNullableTime(dedupLastAtOf(currentMetaMemory) || undefined)}{" "}
-                          {dedupLastSimOf(currentMetaMemory) != null ? <span style={{ opacity: 0.8 }}>（sim={dashText(dedupLastSimOf(currentMetaMemory))}）</span> : null}
-                        </div>
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">合并键</div>
-                        <div className="memoryStaticValue">{mergeKeyOf(currentMetaMemory)}</div>
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">合并事件</div>
-                        <div className="memoryInlineFields">
-                          <button
-                            className="smallBtn"
-                            type="button"
-                            onClick={() => setShowMergeEvents((v) => !v)}
-                            title="从 /api/events 拉取并筛选 memory_write_dedup_merge"
-                          >
-                            {showMergeEvents ? "隐藏" : "显示"}
-                          </button>
-                          {showMergeEvents ? (
-                            <button
-                              className="smallBtn"
-                              type="button"
-                              disabled={mergeEventsLoading}
-                              onClick={() => void loadMergeEvents()}
-                              title="刷新"
-                            >
-                              <RefreshCcw size={14} />
-                            </button>
-                          ) : null}
-                        </div>
-                      </div>
-                      {showMergeEvents ? (
-                        <div className="memoryEventPanel">
-                          {mergeEventsLoading ? <div className="memoryStaticValue">加载中…</div> : null}
-                          {mergeEventsError ? <div className="memoryStaticValue state-deleted">{mergeEventsError}</div> : null}
-                          {!mergeEventsLoading && !mergeEventsError && !mergeEvents.length ? (
-                            <div className="memoryStaticValue">暂无合并事件</div>
-                          ) : null}
-                          {mergeEvents.map((ev) => (
-                            <div key={ev.id} className="memoryEventRow">
-                              <div className="memoryEventTop">
-                                <span className="memoryBadge state-merged" title={ev.type} style={{ gap: "4px" }}>
-                                  <GitMerge size={12} />
-                                  <span>merge</span>
-                                </span>
-                                <span className="memoryEventTime">{formatNullableTime(ev.timestamp)}</span>
-                                <span className="memoryEventSim" style={{ marginLeft: "auto" }}>
-                                  sim={dashText(ev.consequences?.sim)}
-                                </span>
+
+                      {clusters.length ? (
+                        <div className="memoryBentoGrid">
+                          {clusters.map((cluster) => {
+                            const mem = cluster.representative;
+                            const key = cluster.key;
+                            const open = detailsKey === key;
+                            const editing = editingKey === key && editDraft?.key === key;
+                            const draftSummary = editing ? editDraft.summary : mem.summary;
+                            const draftContent = editing ? editDraft.content : mem.content;
+                            const draftPinned = editing ? editDraft.pinned : mem.pinned;
+                            const mergeKey = mergeKeyOf(mem);
+                            const mergedCount = mergedSourcesCountOf(mem);
+                            return (
+                              <div key={key} className={`memoryBentoCard ${mem.deleted_at ? "deleted" : ""}`}>
+                                <div className="memoryBentoTop">
+                                  <div className="memoryBentoSummaryRow">
+                                    {editing ? (
+                                      <textarea
+                                        className="memoryBentoTextarea memoryBentoSummaryTextarea"
+                                        value={draftSummary}
+                                        onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, summary: e.target.value } : prev))}
+                                        style={
+                                          editSizing?.key === key && editSizing.summaryHeight
+                                            ? { height: `${editSizing.summaryHeight}px` }
+                                            : undefined
+                                        }
+                                        aria-label="编辑摘要"
+                                      />
+                                    ) : (
+                                      <div
+                                        className="memoryBentoSummary"
+                                        title={mem.summary}
+                                        ref={(el) => {
+                                          summaryRefByKey.current.set(key, el);
+                                        }}
+                                      >
+                                        {mem.summary || "（无摘要）"}
+                                      </div>
+                                    )}
+                                    {cluster.members.length > 1 ? (
+                                      <span className="memoryBentoBadge" title="同簇多条">
+                                        ×{cluster.members.length}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <div className="memoryBentoActions">
+                                    <button
+                                      type="button"
+                                      className={`memoryBentoActionIcon ${draftPinned ? "on" : ""}`}
+                                      onClick={() => void togglePin(key, mem)}
+                                      aria-label={draftPinned ? "取消置顶" : "置顶"}
+                                      title={draftPinned ? "取消置顶" : "置顶"}
+                                      disabled={saving}
+                                    >
+                                      <Pin size={16} />
+                                    </button>
+                                    {!editing ? (
+                                      <button
+                                        type="button"
+                                        className="memoryBentoActionIcon"
+                                        onClick={() => beginEdit(key, mem)}
+                                        aria-label="编辑"
+                                        title="编辑"
+                                        disabled={saving || !!mem.deleted_at}
+                                      >
+                                        <Edit size={16} />
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        className="memoryBentoActionIcon"
+                                        onClick={cancelEdit}
+                                        aria-label="取消编辑"
+                                        title="取消编辑"
+                                        disabled={saving}
+                                      >
+                                        <X size={16} />
+                                      </button>
+                                    )}
+                                    {editing ? (
+                                      <button
+                                        type="button"
+                                        className="memoryBentoActionIcon on"
+                                        onClick={() => void saveEdit()}
+                                        aria-label="保存编辑"
+                                        title="保存编辑"
+                                        disabled={saving || !!mem.deleted_at}
+                                      >
+                                        <Save size={16} />
+                                      </button>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="memoryBentoActionIcon danger"
+                                      onClick={() => void removeMemory(mem)}
+                                      aria-label="软删除"
+                                      title="软删除"
+                                      disabled={saving || !!mem.deleted_at}
+                                    >
+                                      <Trash2 size={16} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`memoryBentoActionIcon ${open ? "on" : ""}`}
+                                      onClick={() => setDetailsKey((cur) => (cur === key ? null : key))}
+                                      aria-label={open ? "收起详情" : "展开详情"}
+                                      title={open ? "收起详情" : "展开详情"}
+                                    >
+                                      <Info size={16} />
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {editing ? (
+                                  <textarea
+                                    className="memoryBentoTextarea"
+                                    value={draftContent}
+                                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, content: e.target.value } : prev))}
+                                    style={
+                                      editSizing?.key === key && editSizing.contentHeight
+                                        ? { height: `${editSizing.contentHeight}px` }
+                                        : undefined
+                                    }
+                                    aria-label="编辑正文"
+                                  />
+                                ) : (
+                                  <div
+                                    className="memoryBentoContent"
+                                    ref={(el) => {
+                                      contentRefByKey.current.set(key, el);
+                                    }}
+                                  >
+                                    {mem.content}
+                                  </div>
+                                )}
+                                <div className="memoryBentoFooter">
+                                  <span className="memoryBentoMeta">
+                                    {mem.scope === "pc" ? `PC · ${findPcName(props.pcs, mem.owner_pc_id)}` : scopeLabel(mem.scope)}
+                                  </span>
+                                  <span className="memoryBentoMeta">{formatNullableTime(mem.updated_at)}</span>
+                                </div>
+
+                                {open ? (
+                                  <div className="memoryBentoDetails">
+                                    <div className="memoryBentoDetailGrid">
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">id</div>
+                                        <div className="memoryBentoDetailValue">{mem.id}</div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">scope</div>
+                                        <div className="memoryBentoDetailValue">
+                                          {mem.scope}
+                                          {mem.scope_id ? <span className="memoryBentoDetailMuted"> · {mem.scope_id}</span> : null}
+                                        </div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">owner</div>
+                                        <div className="memoryBentoDetailValue">{findPcName(props.pcs, mem.owner_pc_id)}</div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">importance / score</div>
+                                        <div className="memoryBentoDetailValue">
+                                          {mem.importance} / {mem.score}
+                                        </div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">access</div>
+                                        <div className="memoryBentoDetailValue">
+                                          {mem.access_count}
+                                          {mem.last_accessed_at ? <span className="memoryBentoDetailMuted"> · {formatNullableTime(mem.last_accessed_at)}</span> : null}
+                                        </div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">created / updated</div>
+                                        <div className="memoryBentoDetailValue">
+                                          {formatNullableTime(mem.created_at)}{" "}
+                                          <span className="memoryBentoDetailMuted">·</span> {formatNullableTime(mem.updated_at)}
+                                        </div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">edit_state</div>
+                                        <div className="memoryBentoDetailValue">
+                                          {mem.edit_state}
+                                          {mem.deleted_at ? <span className="memoryBentoDetailMuted"> · deleted</span> : null}
+                                        </div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">revision</div>
+                                        <div className="memoryBentoDetailValue">{mem.revision}</div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">source_type</div>
+                                        <div className="memoryBentoDetailValue">{mem.source_type || "—"}</div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">merge_key</div>
+                                        <div className="memoryBentoDetailValue">{mergeKey || "—"}</div>
+                                      </div>
+                                      <div className="memoryBentoDetailRow">
+                                        <div className="memoryBentoDetailLabel">merged_sources</div>
+                                        <div className="memoryBentoDetailValue">{mergedCount ? `+${mergedCount}` : "0"}</div>
+                                      </div>
+                                      {cluster.members.length > 1 ? (
+                                        <div className="memoryBentoDetailRow">
+                                          <div className="memoryBentoDetailLabel">members</div>
+                                          <div className="memoryBentoDetailValue">
+                                            {cluster.members.map((m) => m.summary).filter(Boolean).slice(0, 6).join(" · ") || "—"}
+                                            {cluster.members.length > 6 ? <span className="memoryBentoDetailMuted"> · …</span> : null}
+                                          </div>
+                                        </div>
+                                      ) : null}
+                                    </div>
+
+                                    {mem.meta && Object.keys(mem.meta).length ? (
+                                      <pre className="memoryBentoMetaJson">{JSON.stringify(mem.meta, null, 2)}</pre>
+                                    ) : (
+                                      <div className="memoryHint">meta 为空</div>
+                                    )}
+                                  </div>
+                                ) : null}
                               </div>
-                              <div className="memoryEventSummary">{ev.summary}</div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
-                      ) : null}
-                      <div className="formRow">
-                        <div className="formLabel">分数</div>
-                        <div className="memoryStaticValue">{dashText(currentMetaMemory?.score)}</div>
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">重要度</div>
-                        {isEditing ? (
-                          <div className="memoryInlineFields">
-                            <input
-                              className="customSelect"
-                              type="number"
-                              min={0}
-                              max={10}
-                              value={draft.importance}
-                              disabled={!!draft.deleted_at}
-                              onChange={(e) => setDraft((prev) => ({ ...prev, importance: Number(e.target.value || 0) }))}
-                            />
-                          </div>
-                        ) : (
-                          <div className="memoryStaticValue">{dashText(selected?.importance)}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">访问次数</div>
-                        <div className="memoryStaticValue">{dashText(currentMetaMemory?.access_count)}</div>
-                      </div>
+                      ) : (
+                        <div className="memoryEmpty">暂无该 kind 记忆</div>
+                      )}
                     </div>
-                  </div>
-
-                  <div className="memoryDetailMain">
-                    <div className="memoryDetailGroup">
-                      <div className="memoryDetailGroupTitle">生命周期</div>
-                      <div className="formRow">
-                        <div className="formLabel">编辑状态</div>
-                        {isEditing ? (
-                          <select
-                            className="customSelect"
-                            value={draft.deleted_at ? "deleted" : draft.edit_state}
-                            disabled={!draft.id || !!draft.deleted_at}
-                            onChange={(e) => setDraft((prev) => ({ ...prev, edit_state: e.target.value as MemoryEditState }))}
-                          >
-                            {draft.deleted_at ? <option value="deleted">已删除</option> : null}
-                            {EDIT_STATE_OPTIONS.map((state) => (
-                              <option key={state} value={state}>{editStateLabel(state)}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="memoryStaticValue">{selected ? editStateLabel(selected.edit_state) : "-"}</div>
-                        )}
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">修订号</div>
-                        <div className="memoryStaticValue">{dashText(isEditing ? draft.revision : selected?.revision)}</div>
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">更新时间</div>
-                        <div className="memoryStaticValue">{formatNullableTime(isEditing ? currentMetaMemory?.updated_at : selected?.updated_at)}</div>
-                      </div>
-                      <div className="formRow">
-                        <div className="formLabel">删除时间</div>
-                        <div className="memoryStaticValue">{formatNullableTime(isEditing ? draft.deleted_at : selected?.deleted_at)}</div>
-                      </div>
-                    </div>
-                    <div className="memoryDetailGroup">
-                      <div className="memoryDetailGroupTitle">正文</div>
-                      <div className="formRow memoryTextareaRow">
-                        <div className="formLabel">正文</div>
-                        {isEditing ? (
-                          <div className="memoryContentPanel memoryContentPanelEditing">
-                            <textarea
-                              className="memoryTextarea"
-                              value={draft.content}
-                              disabled={!!draft.deleted_at}
-                              onChange={(e) => setDraft((prev) => ({ ...prev, content: e.target.value }))}
-                              placeholder="记忆正文"
-                            />
-                          </div>
-                        ) : (
-                          <div className="memoryContentPanel">
-                            <pre className="memoryContent">{dashText(selected?.content)}</pre>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                {panelMode === "view" && selected?.deleted_at ? <div className="memoryHint">此条已软删除，当前版本仅支持浏览，不支持恢复。</div> : null}
-                {panelMode === "create" ? <div className="memoryHint">新建入口仍限定为角色私有下的自传 / 秘密；其余类型先通过修改已有条目处理。</div> : null}
+                  );
+                })}
               </div>
-            ) : (
-              <div className="memoryEmpty">从左侧选择一条记忆查看详情，或点击“新建”开始录入。</div>
-            )}
+            </div>
           </section>
         </div>
 
