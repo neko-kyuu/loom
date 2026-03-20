@@ -1078,6 +1078,9 @@ class TickRunner:
 
         pcs = [{"id": p.id, "name": p.name} for p in self._engine.pcs]
 
+        broadcast_msgs = await self._store.list_messages("broadcast", limit=3)
+        broadcast_recent_text = "\n".join([self._summarize_message(m, max_len=800) for m in broadcast_msgs]).strip()
+
         messages = render_prompt_messages(
             "tick_runner.v4_action",
             {
@@ -1089,6 +1092,7 @@ class TickRunner:
                 "threads_digest_json": json.dumps(threads_digest, ensure_ascii=False),
                 "inbox_digest_json": json.dumps(inbox_digest, ensure_ascii=False),
                 "recall_json": json.dumps(recall, ensure_ascii=False),
+                "broadcast_recent_text": broadcast_recent_text,
             },
         )
 
