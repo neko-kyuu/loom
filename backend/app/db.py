@@ -1393,6 +1393,58 @@ class SqliteStore:
             except Exception:
                 pass
 
+    async def delete_memory_summary_embeddings(self, *, memory_ids: Iterable[str]) -> int:
+        ids = [mid for mid in memory_ids if isinstance(mid, str) and mid.strip()]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                f"SELECT memory_id, model, dims FROM memory_summary_embeddings WHERE memory_id IN ({placeholders})",
+                ids,
+            )
+            rows = await cur.fetchall()
+            meta: list[tuple[str, str, int]] = []
+            for r in rows:
+                mid = str(r["memory_id"] or "").strip()
+                model = str(r["model"] or "").strip()
+                try:
+                    dims = int(r["dims"])
+                except Exception:
+                    dims = 0
+                if mid and model and dims > 0:
+                    meta.append((mid, model, dims))
+
+            cur2 = await db.execute(
+                f"DELETE FROM memory_summary_embeddings WHERE memory_id IN ({placeholders})",
+                ids,
+            )
+            deleted = int(getattr(cur2, "rowcount", 0) or 0)
+            await db.commit()
+
+            try:
+                loaded, _ = await self._try_load_sqlite_vec(db)
+                if loaded and meta:
+                    by_table: dict[str, list[str]] = {}
+                    for mid, model, dims in meta:
+                        by_table.setdefault(_vec_table_name(model=model, dims=dims), []).append(mid)
+
+                    for table, mids in by_table.items():
+                        if not await self._sqlite_table_exists(db, table=table):
+                            continue
+                        placeholders2 = ", ".join("?" for _ in mids)
+                        await db.execute(
+                            f"DELETE FROM {table} WHERE memory_id IN ({placeholders2})",
+                            mids,
+                        )
+                    await db.commit()
+            except Exception:
+                pass
+
+        return deleted
+
     async def knn_memory_summary_similarities(
         self,
         *,

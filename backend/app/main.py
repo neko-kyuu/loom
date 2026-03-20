@@ -19,6 +19,7 @@ from .demo_forum import DemoForumSeedConfig, build_demo_forum_seed
 from .doc_search import DocSearchService
 from .engine import DemoEngine, ForumChannel
 from .llm import LlmService
+from .memory.embeddings import maybe_upsert_memory_summary_embeddings
 from .models import Actor, Event, MemoryEntry, Message, WsClientToServer
 from .state import build_state_message
 from .settings import get_settings
@@ -762,6 +763,18 @@ async def patch_memory(memory_id: str, payload: dict[str, Any] = Body(...)) -> d
     item = _revalidate_memory(item)
     await store.upsert_memory(item)
 
+    if item.deleted_at or item.edit_state == "deleted":
+        try:
+            await store.delete_memory_summary_embeddings(memory_ids=[item.id])
+        except Exception:  # noqa: BLE001
+            pass
+    elif "summary" in changed_fields:
+        # Embeddings are derived from summary; keep vector index in sync (best-effort, async).
+        asyncio.create_task(
+            maybe_upsert_memory_summary_embeddings(runner=tick_runner, memories=[item]),
+            name=f"memory-summary-embed:{item.id}",
+        )
+
     if changed_fields:
         await store.add_event(
             Event(
@@ -804,6 +817,10 @@ async def delete_memory(memory_id: str) -> dict[str, Any]:
     item = _revalidate_memory(item)
 
     await store.upsert_memory(item)
+    try:
+        await store.delete_memory_summary_embeddings(memory_ids=[item.id])
+    except Exception:  # noqa: BLE001
+        pass
     await store.add_event(
         Event(
             type="memory_manual_delete",
