@@ -621,13 +621,6 @@ async def post_memories_decay(payload: dict[str, Any] | None = Body(default=None
     return {"ok": True, "turn_no": turn_no, "stats": stats}
 
 
-def _assert_manual_memory_kind(kind: str) -> str:
-    normalized = kind.strip()
-    if normalized not in {"autobiography", "secret"}:
-        raise HTTPException(status_code=400, detail="manual memory kind must be autobiography or secret")
-    return normalized
-
-
 def _default_manual_edit_state(kind: str) -> str:
     if kind in {"autobiography", "secret"}:
         return "user_locked"
@@ -648,44 +641,6 @@ def _revalidate_memory(item: MemoryEntry) -> MemoryEntry:
         return MemoryEntry.model_validate(item.model_dump())
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-@app.post("/api/memories")
-async def post_memory(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-    owner_pc_id = str(payload.get("owner_pc_id") or "").strip()
-    summary = str(payload.get("summary") or "").strip()
-    content = str(payload.get("content") or "").strip()
-    kind = _assert_manual_memory_kind(str(payload.get("kind") or "").strip())
-    if not owner_pc_id:
-        raise HTTPException(status_code=400, detail="owner_pc_id is required")
-    if not summary:
-        raise HTTPException(status_code=400, detail="summary is required")
-    if not content:
-        raise HTTPException(status_code=400, detail="content is required")
-
-    importance_raw = payload.get("importance", 0)
-    try:
-        importance = max(0, min(10, int(importance_raw)))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"invalid importance: {e}") from e
-
-    pinned = bool(payload.get("pinned"))
-    item = MemoryEntry(
-        scope="pc",
-        owner_pc_id=owner_pc_id,
-        kind=kind,
-        summary=summary,
-        content=content,
-        importance=importance,
-        score=importance,
-        edit_state=_default_manual_edit_state(kind),
-        source_type="manual",
-        pinned=pinned,
-        meta={"manual": True, "source": "memory_debugger"},
-    )
-    await store.upsert_memory(item)
-    return {"ok": True, "item": item.model_dump()}
-
 
 @app.patch("/api/memories/{memory_id}")
 async def patch_memory(memory_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:

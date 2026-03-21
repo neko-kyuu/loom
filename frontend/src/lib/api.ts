@@ -159,21 +159,6 @@ export async function patchMemory(memoryId: string, patch: Record<string, any>):
   return res.item;
 }
 
-export async function createMemory(payload: {
-  owner_pc_id: string;
-  kind: "autobiography" | "secret";
-  summary: string;
-  content: string;
-  importance?: number;
-  pinned?: boolean;
-}): Promise<MemoryEntry> {
-  const res = await jsonFetch<{ ok: true; item: MemoryEntry }>(`${httpBase()}/api/memories`, {
-    method: "POST",
-    body: JSON.stringify(payload)
-  });
-  return res.item;
-}
-
 export async function deleteMemory(memoryId: string): Promise<MemoryEntry> {
   const res = await jsonFetch<{ ok: true; item: MemoryEntry }>(
     `${httpBase()}/api/memories/${encodeURIComponent(memoryId)}`,
