@@ -330,7 +330,6 @@ async def _list_existing_memories_for_write(
 ) -> list[dict[str, Any]]:
     thread_title = thread.title if isinstance(thread, ForumThread) else ""
     keywords = _extract_memory_keywords(runner, actor_name, thread_title, message.content)
-    include_public = message.channel == "broadcast"
     direct_scope_id: str | None = None
     if message.channel == "direct":
         scope_data = _memory_scope_for_message(runner=runner, message=message, actor_pc_id=actor_pc_id, kind="recent_event")
@@ -340,7 +339,6 @@ async def _list_existing_memories_for_write(
     memories = await runner._store.search_memories(  # noqa: SLF001
         keywords=keywords,
         owner_pc_id=actor_pc_id,
-        include_public=include_public,
         direct_scope_id=direct_scope_id,
         limit=max(1, int(runner._settings.memory_write_existing_max_items)),  # noqa: SLF001
     )
@@ -351,6 +349,30 @@ async def _list_existing_memories_for_write(
             limit=max(1, int(runner._settings.memory_write_existing_max_items)),  # noqa: SLF001
         )
     max_items = max(1, int(runner._settings.memory_write_existing_max_items))  # noqa: SLF001
+    return [_pack_existing_memory_for_write(memory) for memory in memories[:max_items]]
+
+
+async def _list_public_memories_for_write(
+    *,
+    runner: "TickRunner",
+    actor_name: str,
+    message: Message,
+    thread: ForumThread | None,
+) -> list[dict[str, Any]]:
+    thread_title = thread.title if isinstance(thread, ForumThread) else ""
+    keywords = _extract_memory_keywords(runner, actor_name, thread_title, message.content)
+    max_items = max(1, int(runner._settings.memory_write_existing_max_items))  # noqa: SLF001
+
+    memories = await runner._store.search_memories(  # noqa: SLF001
+        keywords=keywords,
+        include_public=True,
+        limit=max_items,
+    )
+    if not memories:
+        memories = await runner._store.list_memories(  # noqa: SLF001
+            scope="public",
+            limit=max_items,
+        )
     return [_pack_existing_memory_for_write(memory) for memory in memories[:max_items]]
 
 
@@ -387,6 +409,12 @@ async def _llm_memory_write_upserts(
         message=message,
         thread=thread,
     )
+    public_memories = await _list_public_memories_for_write(
+        runner=runner,
+        actor_name=actor_name,
+        message=message,
+        thread=thread,
+    )
 
     messages = render_prompt_messages(
         "tick_runner.memory_write",
@@ -401,6 +429,7 @@ async def _llm_memory_write_upserts(
             "message_json": json.dumps(message.model_dump(), ensure_ascii=False),
             "thread_json": json.dumps(thread_payload, ensure_ascii=False),
             "existing_memories_json": json.dumps(existing_memories, ensure_ascii=False),
+            "public_memories_json": json.dumps(public_memories, ensure_ascii=False),
         },
     )
     url = openai_chat_completions_url(runner._settings.openai_base_url)  # noqa: SLF001

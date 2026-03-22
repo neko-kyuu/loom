@@ -155,7 +155,7 @@ TICK_RUNNER_MEMORY_WRITE_SYSTEM = """<task>
 <rules>
 - 只记录消息里明确出现的事实、偏好、关系变化或事件，不要脑补
 - 这是跑团语境：优先捕捉可复用的信息（重要人物/地点/线索/承诺与目标/道具与资源/伤病状态/关系变化/秘密）
-- 可以利用 <existing_memories> 做合并/改写，避免同主题重复堆积
+- 可以利用 <existing_memories> 中的角色/私聊相关记忆与公共记忆做合并/改写，避免同主题重复堆积
 - 输出 0~{{max_items}} 条 upserts；宁缺毋滥
 - kind 只能是 autobiography / relationship / recent_event / secret
 - relationship / autobiography / secret 优先给稳定的 merge_key；同主题后续会用它覆盖更新
@@ -190,7 +190,12 @@ message_json={{message_json}}
 thread_json={{thread_json}}
 </source>
 <existing_memories>
+<actor_memories>
 {{existing_memories_json}}
+</actor_memories>
+<public_memories>
+{{public_memories_json}}
+</public_memories>
 </existing_memories>"""
 
 TICK_RUNNER_DM_DIGEST_ACTION_SYSTEM = """<identity>
