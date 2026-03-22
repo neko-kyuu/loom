@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     memory_recent_event_max_per_scope: int = 24
     memory_recent_event_max_per_conversation: int = 16
     memory_recent_event_max_per_thread: int = 12
+    memory_recent_event_compact_enabled: bool = True
+    memory_recent_event_compact_interval_ticks: int = 50
+    memory_recent_event_compact_scan_limit: int = 300
+    memory_recent_event_compact_min_sources: int = 4
+    memory_recent_event_compact_max_sources: int = 6
     memory_decay_interval_ticks: int = 50
     memory_decay_k: int = 1
     memory_decay_threshold: int = -3

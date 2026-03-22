@@ -26,6 +26,7 @@ from .models import Actor, Event, ForumThread, MemoryEntry, Message, PcActivity,
 from .settings import Settings
 from .v4_executor import ToolCallLimits, run_tool_calling_loop
 from .ws import ConnectionManager
+from .memory.compact import compact_recent_events
 from .memory.search_tool import handle_memory_search_tool, memory_search_tool_spec
 from .memory.writer import write_memories_for_message
 
@@ -178,6 +179,7 @@ class TickRunner:
                 await self._save_state(state)
 
             await self._maybe_run_memory_decay(turn_no=state.turn_no)
+            await self._maybe_run_recent_event_compaction(turn_no=state.turn_no)
             await self._run_dm_digest_if_due()
 
     async def _maybe_run_memory_decay(self, *, turn_no: int) -> None:
@@ -196,6 +198,28 @@ class TickRunner:
                 summary=(
                     f"memory decay at turn {turn_no}: decayed={stats['decayed']}, "
                     f"deleted={stats['deleted']}, remaining={stats['remaining']}"
+                ),
+                visibility="private",
+                consequences={"turn_no": turn_no, **stats},
+            )
+        )
+
+    async def _maybe_run_recent_event_compaction(self, *, turn_no: int) -> None:
+        interval = max(0, int(getattr(self._settings, "memory_recent_event_compact_interval_ticks", 50)))
+        if interval <= 0 or turn_no <= 0 or (turn_no % interval) != 0:
+            return
+
+        stats = await compact_recent_events(runner=self)
+        if stats["groups"] <= 0:
+            return
+
+        await self._store.add_event(
+            Event(
+                pc_id=None,
+                type="memory_recent_event_compact_job",
+                summary=(
+                    f"recent_event compact at turn {turn_no}: groups={stats['groups']}, "
+                    f"targets={stats['targets_written']}, deleted={stats['sources_deleted']}"
                 ),
                 visibility="private",
                 consequences={"turn_no": turn_no, **stats},

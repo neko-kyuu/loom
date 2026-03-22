@@ -10,6 +10,7 @@ from pc_config.prompts import render_prompt_messages
 
 from ..llm import openai_chat_completions_url, parse_llm_response
 from ..models import ForumThread, MemoryEntry, Message, utc_now_iso
+from .compact import compact_recent_events
 from .dedup import dedup_merge_memories_on_write
 from .embeddings import maybe_upsert_memory_summary_embeddings
 from .events import add_private_event_safely
@@ -173,7 +174,7 @@ def _limit_recent_event_entries(*, entries: list[MemoryEntry], max_items: int) -
 
 
 def _recent_event_keep_sort_key(memory: MemoryEntry) -> tuple[int, int, int, str, str]:
-    protected = 1 if memory.pinned or memory.edit_state != "normal" else 0
+    protected = 1 if memory.pinned or memory.edit_state != "normal" or memory.source_type == "maintenance_compact" else 0
     return (
         protected,
         int(memory.score),
@@ -194,7 +195,11 @@ def _select_recent_event_prune_ids(memories: list[MemoryEntry], *, limit: int) -
         ranked = sorted(active, key=_recent_event_keep_sort_key, reverse=True)
 
     keep_ids = {memory.id for memory in ranked[:limit]}
-    prunable = [memory for memory in active if not memory.pinned and memory.edit_state == "normal"]
+    prunable = [
+        memory
+        for memory in active
+        if not memory.pinned and memory.edit_state == "normal" and memory.source_type != "maintenance_compact"
+    ]
     return {memory.id for memory in prunable if memory.id not in keep_ids}
 
 
@@ -747,6 +752,19 @@ async def write_memories_for_message(
                 except Exception:
                     pass
             await maybe_upsert_memory_summary_embeddings(runner=runner, memories=entries)
+            recent_scope_filters = list(
+                {
+                    (entry.scope, entry.owner_pc_id, entry.scope_id)
+                    for entry in entries
+                    if entry.kind == "recent_event" and not entry.deleted_at
+                }
+            )
+            if recent_scope_filters:
+                await compact_recent_events(
+                    runner=runner,
+                    actor_pc_id=actor_pc_id,
+                    scope_filters=recent_scope_filters,
+                )
             await _enforce_recent_event_retention(runner=runner, entries=entries, actor_pc_id=actor_pc_id)
     except Exception as exc:
         await add_private_event_safely(
