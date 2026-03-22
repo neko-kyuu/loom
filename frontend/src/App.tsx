@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Conversation, ForumThread, Message, WsServerToClient } from "./types";
 import { createWs } from "./lib/ws";
-import { Brain, Hash, List, MessageCircle, Settings, Pause, Play, ScrollText, Trash2, X, Pin, Lock, Unlock } from "lucide-react";
+import { Brain, Hash, List, MessageCircle, Settings, Pause, Play, ScrollText, Trash2, X, Pin, Lock, Unlock, MoreHorizontal } from "lucide-react";
 import SettingsModal, { type SettingsTabId } from "./components/SettingsModal";
 import PcActivityLogModal from "./components/PcActivityLogModal";
 import MemoryDebuggerModal from "./components/MemoryDebuggerModal";
@@ -51,6 +51,7 @@ import {
 } from "./lib/channels";
 
 type DirectThreadKey = "__all__" | "__unknown__" | "dm" | string;
+const THREAD_TYPING_MIN_VISIBLE_MS = 900;
 
 function conversationLabel(c: Conversation, profiles: ProfilesState) {
   if (c.kind === "broadcast") return "#broadcast";
@@ -134,6 +135,22 @@ function buildDmTargetsByBatchId(messagesByConversation: Record<string, Message[
   return out;
 }
 
+function applyTypingUpdate(
+  prev: Record<string, Set<string>>,
+  key: string | undefined,
+  pcId: string,
+  value: boolean
+): Record<string, Set<string>> {
+  if (!key) return prev;
+  const next: Record<string, Set<string>> = { ...prev };
+  const set = new Set(next[key] || []);
+  if (value) set.add(pcId);
+  else set.delete(pcId);
+  if (set.size) next[key] = set;
+  else delete next[key];
+  return next;
+}
+
 export default function App() {
   const [connected, setConnected] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -142,6 +159,7 @@ export default function App() {
   const [pendingScroll, setPendingScroll] = useState<{ conversationId: string; sendBatchId: string } | null>(null);
   const [activeConvId, setActiveConvId] = useState<string>("broadcast");
   const [typingByConv, setTypingByConv] = useState<Record<string, Set<string>>>({});
+  const [typingByThread, setTypingByThread] = useState<Record<string, Set<string>>>({});
   const [queueState, setQueueState] = useState<{ paused: boolean; queued: number } | null>(null);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -186,6 +204,17 @@ export default function App() {
   const saveTimerRef = useRef<number | null>(null);
   const saveProfilesTimerRef = useRef<number | null>(null);
   const saveChannelsTimerRef = useRef<number | null>(null);
+  const threadTypingShownAtRef = useRef<Record<string, number>>({});
+  const threadTypingHideTimersRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    return () => {
+      for (const timerId of Object.values(threadTypingHideTimersRef.current)) {
+        window.clearTimeout(timerId);
+      }
+      threadTypingHideTimersRef.current = {};
+    };
+  }, []);
 
   useEffect(() => {
     applyAppearance(appearance, customThemes);
@@ -504,14 +533,31 @@ export default function App() {
         return;
       }
       if (msg.type === "typing") {
-        setTypingByConv((prev) => {
-          const next: Record<string, Set<string>> = { ...prev };
-          const set = new Set(next[msg.payload.conversation_id] || []);
-          if (msg.payload.value) set.add(msg.payload.pc_id);
-          else set.delete(msg.payload.pc_id);
-          next[msg.payload.conversation_id] = set;
-          return next;
-        });
+        setTypingByConv((prev) => applyTypingUpdate(prev, msg.payload.conversation_id, msg.payload.pc_id, msg.payload.value));
+        if (msg.payload.thread_id) {
+          const threadTypingKey = `${msg.payload.thread_id}:${msg.payload.pc_id}`;
+          const pendingTimer = threadTypingHideTimersRef.current[threadTypingKey];
+          if (pendingTimer) {
+            window.clearTimeout(pendingTimer);
+            delete threadTypingHideTimersRef.current[threadTypingKey];
+          }
+          if (msg.payload.value) {
+            threadTypingShownAtRef.current[threadTypingKey] = Date.now();
+            setTypingByThread((prev) => applyTypingUpdate(prev, msg.payload.thread_id, msg.payload.pc_id, true));
+          } else {
+            const shownAt = threadTypingShownAtRef.current[threadTypingKey] || 0;
+            const remaining = Math.max(0, THREAD_TYPING_MIN_VISIBLE_MS - (Date.now() - shownAt));
+            const clearTyping = () => {
+              delete threadTypingShownAtRef.current[threadTypingKey];
+              delete threadTypingHideTimersRef.current[threadTypingKey];
+              setTypingByThread((prev) => applyTypingUpdate(prev, msg.payload.thread_id, msg.payload.pc_id, false));
+            };
+            if (remaining <= 0) clearTyping();
+            else {
+              threadTypingHideTimersRef.current[threadTypingKey] = window.setTimeout(clearTyping, remaining);
+            }
+          }
+        }
         return;
       }
       if (msg.type === "queue") {
@@ -1100,6 +1146,10 @@ export default function App() {
                   {forumThreads.map((t) => {
                     const posts = forumPostsByThread[t.id] || [];
                     const last = posts.length ? posts[posts.length - 1] : null;
+                    const typingPc = pcs.find((p) => (typingByThread[t.id] || new Set<string>()).has(p.id)) || null;
+                    const typingActor = typingPc ? ({ kind: "pc", id: typingPc.id, name: typingPc.name } as const) : null;
+                    const typingProfile = typingActor ? getProfile(profiles, typingActor) : null;
+                    const typingName = typingActor ? chatDisplayName(profiles, typingActor) : "";
                     return (
                       <button
                         key={t.id}
@@ -1151,10 +1201,28 @@ export default function App() {
                           </button>
                         </div>
                         <div className="threadTitle">{t.title}</div>
-                        <div className="threadMeta">
+                        <div className={`threadMeta ${typingActor ? "typing" : ""}`}>
                           <span>{formatTime(t.last_activity_at)}</span>
                           <span>·</span>
                           <span>{t.reply_count} 回复</span>
+                          {typingActor ? (
+                            <>
+                              <span className="threadTypingSep">·</span>
+                              <span className="threadTypingAvatar" aria-hidden="true">
+                                {typingProfile?.avatarUrl ? (
+                                  <img
+                                    src={absoluteAssetUrl(typingProfile.avatarUrl)}
+                                    alt=""
+                                    onError={(e) => ((e.currentTarget as HTMLImageElement).style.display = "none")}
+                                  />
+                                ) : (
+                                  avatarLabel(typingName)
+                                )}
+                              </span>
+                              <MoreHorizontal size={14} className="threadTypingDots" aria-hidden="true" />
+                              <span className="threadTypingText">{typingName} 正在输入…</span>
+                            </>
+                          ) : null}
                         </div>
                         {last ? <div className="threadPreview">{last.content}</div> : null}
                       </button>

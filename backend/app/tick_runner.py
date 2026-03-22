@@ -968,6 +968,23 @@ class TickRunner:
 
         return data
 
+    async def _broadcast_typing(
+        self,
+        *,
+        conversation_id: str,
+        pc_id: str,
+        value: bool,
+        thread_id: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "pc_id": pc_id,
+            "value": value,
+        }
+        if thread_id:
+            payload["thread_id"] = thread_id
+        await self._ws.broadcast({"type": "typing", "payload": payload})
+
     async def _llm_action(self, *, pc_id: str, pc_name: str, persona: str | None, since: str | None) -> dict[str, Any]:
         """
         v4: Run a tool-calling agent loop, then return a single final JSON action.
@@ -1109,6 +1126,27 @@ class TickRunner:
 
         async def tool_handler(tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
             tool_audit.append({"name": tool_name, "args": tool_args})
+            typing_channel_id: str | None = None
+            typing_thread_id: str | None = None
+            if tool_name == "forum_get_thread_context":
+                typing_channel_id = self._clean_str(tool_args.get("channel_id"))
+                typing_thread_id = self._clean_str(tool_args.get("thread_id"))
+            if typing_channel_id and typing_thread_id:
+                await self._broadcast_typing(
+                    conversation_id=typing_channel_id,
+                    pc_id=pc_id,
+                    value=True,
+                    thread_id=typing_thread_id,
+                )
+                try:
+                    return await self._v4_execute_tool(pc_id=pc_id, name=tool_name, args=tool_args)
+                finally:
+                    await self._broadcast_typing(
+                        conversation_id=typing_channel_id,
+                        pc_id=pc_id,
+                        value=False,
+                        thread_id=typing_thread_id,
+                    )
             return await self._v4_execute_tool(pc_id=pc_id, name=tool_name, args=tool_args)
 
         final_action = await run_tool_calling_loop(

@@ -39,7 +39,7 @@ export type WsServerToClient =
   | { type: "message_deleted"; payload: { message_ids: string[] } }
   | { type: "message_edited"; payload: { message_ids: string[]; content: string } }
   | { type: "forum_thread"; payload: { thread: ForumThread } }
-  | { type: "typing"; payload: { conversation_id: string; pc_id: string; value: boolean } }
+  | { type: "typing"; payload: { conversation_id: string; pc_id: string; value: boolean; thread_id?: string } }
   | { type: "queue"; payload: { paused: boolean; queued: number } }
   | { type: "error"; payload: { message: string } };
 
