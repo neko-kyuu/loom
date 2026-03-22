@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from typing import Any, TYPE_CHECKING
 from uuid import NAMESPACE_URL, uuid5
 
@@ -98,6 +99,130 @@ def _extract_memory_keywords(runner: "TickRunner", *parts: str) -> list[str]:
             break
 
     return keywords[:limit]
+
+
+def _normalize_recent_event_topic_part(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    tokens = _MEMORY_TOKEN_PATTERN.findall(value)
+    if not tokens:
+        return None
+    cleaned = "_".join(token.strip().casefold() for token in tokens if token.strip())
+    cleaned = cleaned.strip("_")
+    return cleaned[:24] if cleaned else None
+
+
+def _build_recent_event_merge_key(
+    *,
+    scope: str,
+    scope_id: str | None,
+    owner_pc_id: str | None,
+    conversation_id: str | None,
+    thread_id: str | None,
+    subject_type: str | None,
+    subject_id: str | None,
+    keywords: list[str],
+) -> str | None:
+    anchor: str | None = None
+    if isinstance(thread_id, str) and thread_id.strip():
+        anchor = f"thread:{thread_id.strip()}"
+    elif scope == "direct" and isinstance(scope_id, str) and scope_id.strip():
+        anchor = f"direct:{scope_id.strip()}"
+    elif isinstance(conversation_id, str) and conversation_id.strip():
+        anchor = f"conv:{conversation_id.strip()}"
+    elif scope == "pc" and isinstance(owner_pc_id, str) and owner_pc_id.strip():
+        anchor = f"pc:{owner_pc_id.strip()}"
+
+    topic_terms: list[str] = []
+    for value in keywords:
+        part = _normalize_recent_event_topic_part(value)
+        if part and part not in topic_terms:
+            topic_terms.append(part)
+        if len(topic_terms) >= 2:
+            break
+
+    if not anchor or not topic_terms:
+        return None
+
+    parts = ["recent_event", anchor]
+    if subject_type:
+        parts.append(f"subject:{subject_type}")
+    if subject_id:
+        parts.append(f"id:{subject_id}")
+    parts.extend(topic_terms)
+    merge_key = "|".join(parts)
+    return merge_key[:160] if merge_key else None
+
+
+def _limit_recent_event_entries(*, entries: list[MemoryEntry], max_items: int) -> list[MemoryEntry]:
+    max_items = max(0, int(max_items))
+    if max_items <= 0:
+        return [entry for entry in entries if entry.kind != "recent_event"]
+
+    kept_recent_events = 0
+    out: list[MemoryEntry] = []
+    for entry in entries:
+        if entry.kind != "recent_event":
+            out.append(entry)
+            continue
+        if kept_recent_events >= max_items:
+            continue
+        out.append(entry)
+        kept_recent_events += 1
+    return out
+
+
+def _recent_event_keep_sort_key(memory: MemoryEntry) -> tuple[int, int, int, str, str]:
+    protected = 1 if memory.pinned or memory.edit_state != "normal" else 0
+    return (
+        protected,
+        int(memory.score),
+        int(memory.importance),
+        str(memory.updated_at or ""),
+        str(memory.created_at or ""),
+    )
+
+
+def _select_recent_event_prune_ids(memories: list[MemoryEntry], *, limit: int) -> set[str]:
+    limit = max(0, int(limit))
+    active = [memory for memory in memories if not memory.deleted_at]
+    if limit <= 0:
+        ranked = sorted(active, key=_recent_event_keep_sort_key, reverse=True)
+    elif len(active) <= limit:
+        return set()
+    else:
+        ranked = sorted(active, key=_recent_event_keep_sort_key, reverse=True)
+
+    keep_ids = {memory.id for memory in ranked[:limit]}
+    prunable = [memory for memory in active if not memory.pinned and memory.edit_state == "normal"]
+    return {memory.id for memory in prunable if memory.id not in keep_ids}
+
+
+def _collect_recent_event_prune_ids(
+    memories: list[MemoryEntry],
+    *,
+    per_scope_limit: int,
+    per_conversation_limit: int,
+    per_thread_limit: int,
+) -> set[str]:
+    prune_ids = _select_recent_event_prune_ids(memories, limit=per_scope_limit)
+
+    memories_by_conversation: dict[str, list[MemoryEntry]] = defaultdict(list)
+    memories_by_thread: dict[str, list[MemoryEntry]] = defaultdict(list)
+    for memory in memories:
+        meta = memory.meta if isinstance(memory.meta, dict) else {}
+        conversation_id = meta.get("conversation_id")
+        thread_id = meta.get("thread_id")
+        if isinstance(conversation_id, str) and conversation_id.strip():
+            memories_by_conversation[conversation_id.strip()].append(memory)
+        if isinstance(thread_id, str) and thread_id.strip():
+            memories_by_thread[thread_id.strip()].append(memory)
+
+    for group in memories_by_conversation.values():
+        prune_ids.update(_select_recent_event_prune_ids(group, limit=per_conversation_limit))
+    for group in memories_by_thread.values():
+        prune_ids.update(_select_recent_event_prune_ids(group, limit=per_thread_limit))
+    return prune_ids
 
 
 def _select_memory_writer_model(*, runner: "TickRunner", actor_pc_id: str | None) -> str | None:
@@ -207,6 +332,17 @@ def _normalize_memory_upsert(
         merge_parts.extend(keywords[:3] if keywords else [summary])
         merge_key = "_".join(part.strip().casefold().replace(" ", "_") for part in merge_parts if part and part.strip())
         merge_key = merge_key[:120] if merge_key else None
+    if not merge_key and raw_kind == "recent_event":
+        merge_key = _build_recent_event_merge_key(
+            scope=scope,
+            scope_id=scope_id,
+            owner_pc_id=owner_pc_id,
+            conversation_id=message.conversation_id,
+            thread_id=message.thread_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            keywords=keywords,
+        )
 
     meta = {
         "ref_type": "message",
@@ -252,6 +388,102 @@ def _normalize_memory_upsert(
         source_type=source_type,
         meta=meta,
     )
+
+
+async def _soft_delete_memories_for_retention(
+    *,
+    runner: "TickRunner",
+    memory_ids: set[str],
+    actor_pc_id: str | None,
+    reason: str,
+) -> int:
+    ids = [memory_id for memory_id in memory_ids if isinstance(memory_id, str) and memory_id.strip()]
+    if not ids:
+        return 0
+
+    deleted = 0
+    deleted_ids: list[str] = []
+    for memory_id in ids:
+        memory = await runner._store.get_memory(memory_id)  # noqa: SLF001
+        if memory is None or memory.deleted_at or memory.kind != "recent_event":
+            continue
+        if memory.pinned or memory.edit_state != "normal":
+            continue
+        memory.deleted_at = utc_now_iso()
+        memory.edit_state = "deleted"
+        memory.updated_at = memory.deleted_at
+        memory.source_type = "maintenance"
+        memory.revision += 1
+        meta = dict(memory.meta or {})
+        meta["delete_reason"] = reason
+        meta["deleted_by"] = "recent_event_retention"
+        memory.meta = meta
+        await runner._store.upsert_memory(memory)  # noqa: SLF001
+        deleted += 1
+        deleted_ids.append(memory_id)
+
+    if deleted <= 0:
+        return 0
+
+    try:
+        await runner._store.delete_memory_summary_embeddings(memory_ids=deleted_ids)  # noqa: SLF001
+    except Exception:
+        pass
+
+    await add_private_event_safely(
+        runner=runner,
+        pc_id=actor_pc_id,
+        type="memory_recent_event_retention",
+        summary=f"recent_event retention pruned {deleted} memories",
+        consequences={"deleted_ids": deleted_ids, "reason": reason, "deleted": deleted},
+    )
+    return deleted
+
+
+async def _enforce_recent_event_retention(
+    *,
+    runner: "TickRunner",
+    entries: list[MemoryEntry],
+    actor_pc_id: str | None,
+) -> None:
+    recent_entries = [entry for entry in entries if entry.kind == "recent_event" and not entry.deleted_at]
+    if not recent_entries:
+        return
+
+    per_scope_limit = max(1, int(getattr(runner._settings, "memory_recent_event_max_per_scope", 12)))  # noqa: SLF001
+    per_conversation_limit = max(
+        1, int(getattr(runner._settings, "memory_recent_event_max_per_conversation", 8))
+    )  # noqa: SLF001
+    per_thread_limit = max(1, int(getattr(runner._settings, "memory_recent_event_max_per_thread", 6)))  # noqa: SLF001
+
+    seen_scope_keys: set[tuple[str, str | None, str | None]] = set()
+    for entry in recent_entries:
+        scope_key = (entry.scope, entry.owner_pc_id, entry.scope_id)
+        if scope_key in seen_scope_keys:
+            continue
+        seen_scope_keys.add(scope_key)
+
+        memories = await runner._store.list_memories(  # noqa: SLF001
+            scope=entry.scope,
+            owner_pc_id=entry.owner_pc_id,
+            scope_id=entry.scope_id,
+            kind="recent_event",
+            limit=1000,
+        )
+        prune_ids = _collect_recent_event_prune_ids(
+            memories,
+            per_scope_limit=per_scope_limit,
+            per_conversation_limit=per_conversation_limit,
+            per_thread_limit=per_thread_limit,
+        )
+        if not prune_ids:
+            continue
+        await _soft_delete_memories_for_retention(
+            runner=runner,
+            memory_ids=prune_ids,
+            actor_pc_id=actor_pc_id,
+            reason="recent_event_retention_limit",
+        )
 
 
 def _deterministic_memory_write_upserts(*, runner: "TickRunner", message: Message, actor_name: str, thread: ForumThread | None) -> list[dict[str, Any]]:
@@ -499,6 +731,10 @@ async def write_memories_for_message(
             if entry is not None:
                 entries.append(entry)
         if entries:
+            entries = _limit_recent_event_entries(
+                entries=entries,
+                max_items=max(0, int(getattr(runner._settings, "memory_write_recent_event_max_items", 1))),  # noqa: SLF001
+            )
             entries, precomputed = await dedup_merge_memories_on_write(runner=runner, entries=entries)
             await runner._store.upsert_memories(entries)  # noqa: SLF001
             if precomputed:
@@ -511,6 +747,7 @@ async def write_memories_for_message(
                 except Exception:
                     pass
             await maybe_upsert_memory_summary_embeddings(runner=runner, memories=entries)
+            await _enforce_recent_event_retention(runner=runner, entries=entries, actor_pc_id=actor_pc_id)
     except Exception as exc:
         await add_private_event_safely(
             runner=runner,

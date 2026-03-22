@@ -49,10 +49,14 @@ class Settings(BaseSettings):
     memory_write_summary_chars: int = 120
     memory_write_content_chars: int = 400
     memory_write_source_excerpt_chars: int = 200
+    memory_write_recent_event_max_items: int = 1
     memory_write_dedup_enabled: bool = True
     memory_write_dedup_min_sim: float = 0.9
     memory_write_dedup_scan_limit: int = 200
     memory_write_dedup_max_age_days: int = 14
+    memory_recent_event_max_per_scope: int = 24
+    memory_recent_event_max_per_conversation: int = 16
+    memory_recent_event_max_per_thread: int = 12
     memory_decay_interval_ticks: int = 50
     memory_decay_k: int = 1
     memory_decay_threshold: int = -3

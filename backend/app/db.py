@@ -1867,9 +1867,9 @@ class SqliteStore:
         now = self._utc_now_iso()
         async with aiosqlite.connect(self._path) as db:
             await db.executemany(
-                "UPDATE memories SET access_count=access_count+1, score=score+1, last_accessed_at=?, updated_at=? "
+                "UPDATE memories SET access_count=access_count+1, score=score+1, last_accessed_at=? "
                 "WHERE id=? AND deleted_at IS NULL",
-                [(now, now, memory_id) for memory_id in ids],
+                [(now, memory_id) for memory_id in ids],
             )
             await db.commit()
 

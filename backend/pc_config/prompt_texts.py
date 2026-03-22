@@ -157,9 +157,12 @@ TICK_RUNNER_MEMORY_WRITE_SYSTEM = """<task>
 - 这是跑团语境：优先捕捉可复用的信息（重要人物/地点/线索/承诺与目标/道具与资源/伤病状态/关系变化/秘密）
 - 可以利用 <existing_memories> 中的角色/私聊相关记忆与公共记忆做合并/改写，避免同主题重复堆积
 - 输出 0~{{max_items}} 条 upserts；宁缺毋滥
+- 如果只有寒暄、确认收到、机械重复、低信息量推进，优先输出 0 条
 - kind 只能是 autobiography / relationship / recent_event / secret
 - relationship / autobiography / secret 优先给稳定的 merge_key；同主题后续会用它覆盖更新
-- recent_event 一般只在确有值得保留的新事件时写入
+- recent_event 只在“后续很可能被复用”的事件时写入：例如新线索、新承诺、新资源、新风险、新状态变化
+- recent_event 不要为普通寒暄、简单附和、重复确认、无新信息的短回应单独写入
+- 如果 recent_event 与现有记忆属于同一 thread / 同一私聊 / 同一主题，优先沿用稳定 merge_key 做更新，而不是新建碎片记忆
 - secret 只在消息明确暴露“角色私密事实/不愿公开的信息/内心隐秘”时写入；模糊暗示不要写
 - summary 要短，适合检索；content 稍完整但仍要压缩
 - 不要输出 scope，scope 由后端决定
