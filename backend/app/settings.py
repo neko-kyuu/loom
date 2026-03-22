@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     memory_write_content_chars: int = 400
     memory_write_source_excerpt_chars: int = 200
     memory_write_recent_event_max_items: int = 1
+    memory_maintenance_enabled: bool = True
+    memory_maintenance_max_ops: int = 3
     memory_write_dedup_enabled: bool = True
     memory_write_dedup_min_sim: float = 0.9
     memory_write_dedup_scan_limit: int = 200

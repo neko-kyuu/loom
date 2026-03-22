@@ -156,7 +156,7 @@ TICK_RUNNER_MEMORY_WRITE_SYSTEM = """<task>
 - 只记录消息里明确出现的事实、偏好、关系变化或事件，不要脑补
 - 这是跑团语境：优先捕捉可复用的信息（重要人物/地点/线索/承诺与目标/道具与资源/伤病状态/关系变化/秘密）
 - 可以利用 <existing_memories> 中的角色/私聊相关记忆与公共记忆做合并/改写，避免同主题重复堆积
-- 输出 0~{{max_items}} 条 upserts；宁缺毋滥
+- 你可以输出 upsert / rewrite / merge / delete 四类 maintenance ops，也可以只输出 upserts；总操作数控制在 0~{{max_items}} 内，宁缺毋滥
 - 如果只有寒暄、确认收到、机械重复、低信息量推进，优先输出 0 条
 - kind 只能是 autobiography / relationship / recent_event / secret
 - relationship / autobiography / secret 优先给稳定的 merge_key；同主题后续会用它覆盖更新
@@ -164,12 +164,33 @@ TICK_RUNNER_MEMORY_WRITE_SYSTEM = """<task>
 - recent_event 不要为普通寒暄、简单附和、重复确认、无新信息的短回应单独写入
 - 如果 recent_event 与现有记忆属于同一 thread / 同一私聊 / 同一主题，优先沿用稳定 merge_key 做更新，而不是新建碎片记忆
 - secret 只在消息明确暴露“角色私密事实/不愿公开的信息/内心隐秘”时写入；模糊暗示不要写
+- rewrite / merge / delete 只能引用 <existing_memories> 里已经给出的 memory id
+- 不要改写或删除 autobiography、pinned、user_locked、user_edited 的记忆
+- delete / merge 默认只用于 recent_event；如果只是补充新信息，优先 rewrite 或 upsert
 - summary 要短，适合检索；content 稍完整但仍要压缩
 - 不要输出 scope，scope 由后端决定
 - 不要输出 Markdown 或解释文字，只输出严格合法 JSON object
 </rules>
 <json_schema>
 {
+  "ops": [
+    {
+      "type": "rewrite|merge|delete",
+      "target_id": "for rewrite/delete",
+      "target_ids": ["for merge"],
+      "reason": "optional",
+      "memory": {
+        "kind": "recent_event",
+        "merge_key": "stable_topic_key",
+        "summary": "<= {{summary_max_chars}} chars",
+        "content": "<= {{content_max_chars}} chars",
+        "subject_type": "pc|topic",
+        "subject_id": "optional",
+        "importance": 0,
+        "keywords": ["optional"]
+      }
+    }
+  ],
   "upserts": [
     {
       "kind": "relationship",

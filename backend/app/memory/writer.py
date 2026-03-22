@@ -14,6 +14,14 @@ from .compact import compact_recent_events
 from .dedup import dedup_merge_memories_on_write
 from .embeddings import maybe_upsert_memory_summary_embeddings
 from .events import add_private_event_safely
+from .maintenance import (
+    build_maintenance_delete,
+    build_maintenance_merge_target,
+    build_maintenance_rewrite,
+    can_apply_maintenance_op,
+    maintenance_upserts_from_payload,
+    parse_maintenance_ops,
+)
 
 if TYPE_CHECKING:
     from ..tick_runner import TickRunner
@@ -546,12 +554,16 @@ def _pack_existing_memory_for_write(memory: MemoryEntry) -> dict[str, Any]:
         "id": memory.id,
         "scope": memory.scope,
         "kind": memory.kind,
+        "owner_pc_id": memory.owner_pc_id,
+        "scope_id": memory.scope_id,
         "summary": memory.summary,
         "content": memory.content,
         "subject_type": memory.subject_type,
         "subject_id": memory.subject_id,
         "score": memory.score,
+        "pinned": memory.pinned,
         "edit_state": memory.edit_state,
+        "source_type": memory.source_type,
         "deleted_at": memory.deleted_at,
         "merge_key": merge_key,
     }
@@ -564,7 +576,7 @@ async def _list_existing_memories_for_write(
     actor_name: str,
     message: Message,
     thread: ForumThread | None,
-) -> list[dict[str, Any]]:
+) -> list[MemoryEntry]:
     thread_title = thread.title if isinstance(thread, ForumThread) else ""
     keywords = _extract_memory_keywords(runner, actor_name, thread_title, message.content)
     direct_scope_id: str | None = None
@@ -586,7 +598,7 @@ async def _list_existing_memories_for_write(
             limit=max(1, int(runner._settings.memory_write_existing_max_items)),  # noqa: SLF001
         )
     max_items = max(1, int(runner._settings.memory_write_existing_max_items))  # noqa: SLF001
-    return [_pack_existing_memory_for_write(memory) for memory in memories[:max_items]]
+    return memories[:max_items]
 
 
 async def _list_public_memories_for_write(
@@ -595,7 +607,7 @@ async def _list_public_memories_for_write(
     actor_name: str,
     message: Message,
     thread: ForumThread | None,
-) -> list[dict[str, Any]]:
+) -> list[MemoryEntry]:
     thread_title = thread.title if isinstance(thread, ForumThread) else ""
     keywords = _extract_memory_keywords(runner, actor_name, thread_title, message.content)
     max_items = max(1, int(runner._settings.memory_write_existing_max_items))  # noqa: SLF001
@@ -610,10 +622,35 @@ async def _list_public_memories_for_write(
             scope="public",
             limit=max_items,
         )
-    return [_pack_existing_memory_for_write(memory) for memory in memories[:max_items]]
+    return memories[:max_items]
 
 
-async def _llm_memory_write_upserts(
+def _pack_memories_for_write(memories: list[MemoryEntry]) -> list[dict[str, Any]]:
+    return [_pack_existing_memory_for_write(memory) for memory in memories]
+
+
+def _extract_structured_writer_payload(*, runner: "TickRunner", response: Any) -> dict[str, Any] | None:
+    parsed = response.get("parsed") if isinstance(response, dict) else None
+    structured: Any | None = None
+    if isinstance(parsed, dict) and parsed.get("kind") == "structured":
+        structured = parsed.get("structured")
+    elif isinstance(parsed, dict) and parsed.get("kind") == "markdown":
+        markdown = parsed.get("markdown")
+        if isinstance(markdown, str):
+            structured = runner._try_parse_json_loose(markdown)  # noqa: SLF001
+
+    if structured is None:
+        raw = response.get("raw") if isinstance(response, dict) else None
+        parsed_raw = parse_llm_response(raw)
+        if parsed_raw["kind"] == "structured":
+            structured = parsed_raw.get("structured")
+        elif parsed_raw["kind"] == "markdown" and isinstance(parsed_raw.get("markdown"), str):
+            structured = runner._try_parse_json_loose(parsed_raw["markdown"])  # noqa: SLF001
+
+    return structured if isinstance(structured, dict) else None
+
+
+async def _llm_memory_write_plan(
     *,
     runner: "TickRunner",
     actor_pc_id: str | None,
@@ -621,25 +658,23 @@ async def _llm_memory_write_upserts(
     action_type: str,
     message: Message,
     thread: ForumThread | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, MemoryEntry]]:
+    max_items = max(1, int(runner._settings.memory_write_max_items))  # noqa: SLF001
     if runner._settings.demo_fake or runner._llm is None:  # noqa: SLF001
-        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread)
+        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread), [], {}
     if not (runner._settings.openai_base_url and runner._settings.openai_api_key):  # noqa: SLF001
-        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread)
+        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread), [], {}
 
     model = _select_memory_writer_model(runner=runner, actor_pc_id=actor_pc_id)
     if not model:
-        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread)
+        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread), [], {}
 
-    if message.channel == "broadcast":
-        scope_hint = "public + pc"
-    else:
-        scope_hint = "direct + pc"
-
+    scope_hint = "public + pc" if message.channel == "broadcast" else "direct + pc"
     thread_payload: dict[str, Any] | None = None
     if isinstance(thread, ForumThread):
         thread_payload = {"id": thread.id, "channel_id": thread.channel_id, "title": thread.title}
-    existing_memories = await _list_existing_memories_for_write(
+
+    actor_memories = await _list_existing_memories_for_write(
         runner=runner,
         actor_pc_id=actor_pc_id,
         actor_name=actor_name,
@@ -652,11 +687,14 @@ async def _llm_memory_write_upserts(
         message=message,
         thread=thread,
     )
+    candidate_memories: dict[str, MemoryEntry] = {}
+    for memory in [*actor_memories, *public_memories]:
+        candidate_memories[memory.id] = memory
 
     messages = render_prompt_messages(
         "tick_runner.memory_write",
         {
-            "max_items": str(max(1, int(runner._settings.memory_write_max_items))),  # noqa: SLF001
+            "max_items": str(max_items),
             "summary_max_chars": str(max(1, int(runner._settings.memory_write_summary_chars))),  # noqa: SLF001
             "content_max_chars": str(max(1, int(runner._settings.memory_write_content_chars))),  # noqa: SLF001
             "pcs_personas": runner._format_pcs_personas_for_prompt(),  # noqa: SLF001
@@ -665,8 +703,8 @@ async def _llm_memory_write_upserts(
             "actor_name": actor_name,
             "message_json": json.dumps(message.model_dump(), ensure_ascii=False),
             "thread_json": json.dumps(thread_payload, ensure_ascii=False),
-            "existing_memories_json": json.dumps(existing_memories, ensure_ascii=False),
-            "public_memories_json": json.dumps(public_memories, ensure_ascii=False),
+            "existing_memories_json": json.dumps(_pack_memories_for_write(actor_memories), ensure_ascii=False),
+            "public_memories_json": json.dumps(_pack_memories_for_write(public_memories), ensure_ascii=False),
         },
     )
     url = openai_chat_completions_url(runner._settings.openai_base_url)  # noqa: SLF001
@@ -677,31 +715,173 @@ async def _llm_memory_write_upserts(
         messages=messages,
         tools=None,
     )
-
-    parsed = res.get("parsed") if isinstance(res, dict) else None
-    structured: Any | None = None
-    if isinstance(parsed, dict) and parsed.get("kind") == "structured":
-        structured = parsed.get("structured")
-    elif isinstance(parsed, dict) and parsed.get("kind") == "markdown":
-        markdown = parsed.get("markdown")
-        if isinstance(markdown, str):
-            structured = runner._try_parse_json_loose(markdown)  # noqa: SLF001
-
+    structured = _extract_structured_writer_payload(runner=runner, response=res)
     if structured is None:
-        raw = res.get("raw") if isinstance(res, dict) else None
-        parsed_raw = parse_llm_response(raw)
-        if parsed_raw["kind"] == "structured":
-            structured = parsed_raw.get("structured")
-        elif parsed_raw["kind"] == "markdown" and isinstance(parsed_raw.get("markdown"), str):
-            structured = runner._try_parse_json_loose(parsed_raw["markdown"])  # noqa: SLF001
+        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread), [], {}
 
-    if not isinstance(structured, dict):
-        return _deterministic_memory_write_upserts(runner=runner, message=message, actor_name=actor_name, thread=thread)
+    return (
+        maintenance_upserts_from_payload(structured, max_items=max_items),
+        parse_maintenance_ops(
+            structured,
+            max_ops=max(0, int(getattr(runner._settings, "memory_maintenance_max_ops", max_items))),
+        ),
+        candidate_memories,
+    )
 
-    upserts = structured.get("upserts")
-    if not isinstance(upserts, list):
-        return []
-    return [item for item in upserts if isinstance(item, dict)][: max(1, int(runner._settings.memory_write_max_items))]  # noqa: SLF001
+
+async def _apply_maintenance_ops(
+    *,
+    runner: "TickRunner",
+    ops: list[dict[str, Any]],
+    candidate_memories: dict[str, MemoryEntry],
+    actor_pc_id: str | None,
+) -> tuple[list[MemoryEntry], set[str], list[tuple[str, str | None, str | None]]]:
+    if not bool(getattr(runner._settings, "memory_maintenance_enabled", True)):  # noqa: SLF001
+        return [], set(), []
+    if not ops or not candidate_memories:
+        return [], set(), []
+
+    summary_max_chars = max(1, int(runner._settings.memory_write_summary_chars))  # noqa: SLF001
+    content_max_chars = max(1, int(runner._settings.memory_write_content_chars))  # noqa: SLF001
+    touched_ids: set[str] = set()
+    changed: list[MemoryEntry] = []
+    deleted_ids: set[str] = set()
+    recent_scope_filters: set[tuple[str, str | None, str | None]] = set()
+
+    for op in ops:
+        op_type = str(op.get("type") or "").strip()
+        reason = str(op.get("reason") or "").strip() or None
+
+        if op_type == "rewrite":
+            target_id = str(op.get("target_id") or "").strip()
+            item = op.get("memory")
+            existing = candidate_memories.get(target_id)
+            if not target_id or target_id in touched_ids or existing is None:
+                continue
+            if not isinstance(item, dict) or not can_apply_maintenance_op(existing, op_type="rewrite"):
+                continue
+            rewritten = build_maintenance_rewrite(
+                existing=existing,
+                item=item,
+                source_type="llm_maintenance",
+                reason=reason,
+                summary_max_chars=summary_max_chars,
+                content_max_chars=content_max_chars,
+            )
+            if rewritten is None:
+                continue
+            touched_ids.add(target_id)
+            candidate_memories[target_id] = rewritten
+            changed.append(rewritten)
+            if rewritten.kind == "recent_event" and not rewritten.deleted_at:
+                recent_scope_filters.add((rewritten.scope, rewritten.owner_pc_id, rewritten.scope_id))
+            continue
+
+        if op_type == "delete":
+            target_id = str(op.get("target_id") or "").strip()
+            existing = candidate_memories.get(target_id)
+            if not target_id or target_id in touched_ids or existing is None:
+                continue
+            if not can_apply_maintenance_op(existing, op_type="delete"):
+                continue
+            deleted = build_maintenance_delete(
+                existing=existing,
+                source_type="llm_maintenance",
+                reason=reason,
+            )
+            touched_ids.add(target_id)
+            candidate_memories[target_id] = deleted
+            changed.append(deleted)
+            deleted_ids.add(target_id)
+            continue
+
+        if op_type == "merge":
+            raw_target_ids = op.get("target_ids")
+            item = op.get("memory")
+            if not isinstance(raw_target_ids, list) or not isinstance(item, dict):
+                continue
+            target_ids: list[str] = []
+            for value in raw_target_ids:
+                target_id = str(value or "").strip()
+                if target_id and target_id not in target_ids:
+                    target_ids.append(target_id)
+            if len(target_ids) < 2 or any(target_id in touched_ids for target_id in target_ids):
+                continue
+
+            targets = [candidate_memories.get(target_id) for target_id in target_ids]
+            if any(target is None for target in targets):
+                continue
+            memories = [target for target in targets if target is not None]
+            primary = memories[0]
+            if not all(can_apply_maintenance_op(memory, op_type="merge") for memory in memories):
+                continue
+            if not all(
+                memory.scope == primary.scope
+                and memory.scope_id == primary.scope_id
+                and memory.owner_pc_id == primary.owner_pc_id
+                and memory.kind == primary.kind
+                and memory.subject_id == primary.subject_id
+                and memory.subject_type == primary.subject_type
+                for memory in memories
+            ):
+                continue
+            rewritten = build_maintenance_rewrite(
+                existing=primary,
+                item=item,
+                source_type="llm_maintenance",
+                reason=reason,
+                summary_max_chars=summary_max_chars,
+                content_max_chars=content_max_chars,
+            )
+            if rewritten is None:
+                continue
+            merged = build_maintenance_merge_target(
+                primary=primary,
+                rewritten=rewritten,
+                merged_source_ids=target_ids[1:],
+                reason=reason,
+            )
+            changed.append(merged)
+            candidate_memories[primary.id] = merged
+            touched_ids.add(primary.id)
+            recent_scope_filters.add((merged.scope, merged.owner_pc_id, merged.scope_id))
+            for source in memories[1:]:
+                deleted = build_maintenance_delete(
+                    existing=source,
+                    source_type="llm_maintenance",
+                    reason=reason or "merge",
+                    source_memory_id=merged.id,
+                )
+                changed.append(deleted)
+                candidate_memories[source.id] = deleted
+                touched_ids.add(source.id)
+                deleted_ids.add(source.id)
+
+    if not changed:
+        return [], set(), []
+
+    await runner._store.upsert_memories(changed)  # noqa: SLF001
+    if deleted_ids:
+        try:
+            await runner._store.delete_memory_summary_embeddings(memory_ids=list(deleted_ids))  # noqa: SLF001
+        except Exception:
+            pass
+    active_changed = [memory for memory in changed if not memory.deleted_at]
+    if active_changed:
+        await maybe_upsert_memory_summary_embeddings(runner=runner, memories=active_changed)
+
+    await add_private_event_safely(
+        runner=runner,
+        pc_id=actor_pc_id,
+        type="memory_maintenance_ops",
+        summary=f"memory maintenance applied: changed={len(changed)}, deleted={len(deleted_ids)}",
+        consequences={
+            "changed_ids": [memory.id for memory in changed],
+            "deleted_ids": list(deleted_ids),
+            "ops_count": len(ops),
+        },
+    )
+    return changed, deleted_ids, list(recent_scope_filters)
 
 
 async def write_memories_for_message(
@@ -714,7 +894,7 @@ async def write_memories_for_message(
     thread: ForumThread | None = None,
 ) -> None:
     try:
-        raw_upserts = await _llm_memory_write_upserts(
+        raw_upserts, maintenance_ops, candidate_memories = await _llm_memory_write_plan(
             runner=runner,
             actor_pc_id=actor_pc_id,
             actor_name=actor_name,
@@ -722,6 +902,14 @@ async def write_memories_for_message(
             message=message,
             thread=thread,
         )
+        maintenance_scope_filters: list[tuple[str, str | None, str | None]] = []
+        if maintenance_ops:
+            _changed, _deleted_ids, maintenance_scope_filters = await _apply_maintenance_ops(
+                runner=runner,
+                ops=maintenance_ops,
+                candidate_memories=candidate_memories,
+                actor_pc_id=actor_pc_id,
+            )
         entries: list[MemoryEntry] = []
         for item in raw_upserts[: max(1, int(runner._settings.memory_write_max_items))]:  # noqa: SLF001
             entry = _normalize_memory_upsert(
@@ -759,13 +947,20 @@ async def write_memories_for_message(
                     if entry.kind == "recent_event" and not entry.deleted_at
                 }
             )
+            recent_scope_filters.extend(maintenance_scope_filters)
             if recent_scope_filters:
                 await compact_recent_events(
                     runner=runner,
                     actor_pc_id=actor_pc_id,
-                    scope_filters=recent_scope_filters,
+                    scope_filters=list(dict.fromkeys(recent_scope_filters)),
                 )
             await _enforce_recent_event_retention(runner=runner, entries=entries, actor_pc_id=actor_pc_id)
+        elif maintenance_scope_filters:
+            await compact_recent_events(
+                runner=runner,
+                actor_pc_id=actor_pc_id,
+                scope_filters=list(dict.fromkeys(maintenance_scope_filters)),
+            )
     except Exception as exc:
         await add_private_event_safely(
             runner=runner,
